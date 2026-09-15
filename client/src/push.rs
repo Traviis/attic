@@ -633,24 +633,6 @@ pub async fn upload_path(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compression_requires_client_opt_in_and_server_capability() {
-        assert_eq!(select_upload_compression(true, None), None);
-        assert_eq!(
-            select_upload_compression(false, Some(&[UploadCompression::Zstd])),
-            None
-        );
-        assert_eq!(
-            select_upload_compression(true, Some(&[UploadCompression::Zstd])),
-            Some(UploadCompression::Zstd)
-        );
-    }
-}
-
 impl<S: Stream<Item = AtticResult<Vec<u8>>>> NarStreamProgress<S> {
     fn new(stream: S, bar: ProgressBar) -> Self {
         Self { stream, bar }
@@ -679,4 +661,22 @@ impl<S: Stream<Item = AtticResult<Vec<u8>>> + Unpin> Stream for NarStreamProgres
 fn average_speed(bytes: u64, duration: Duration) -> String {
     let speed = bytes as f64 * 1000_f64 / duration.as_millis() as f64;
     format!("{}/s", HumanBytes(speed as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compression_requires_client_opt_in_and_server_capability() {
+        assert_eq!(select_upload_compression(true, None), None);
+        assert_eq!(
+            select_upload_compression(false, Some(&[UploadCompression::Zstd])),
+            None
+        );
+        assert_eq!(
+            select_upload_compression(true, Some(&[UploadCompression::Zstd])),
+            Some(UploadCompression::Zstd)
+        );
+    }
 }

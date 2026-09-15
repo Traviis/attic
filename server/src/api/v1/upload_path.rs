@@ -1,5 +1,4 @@
 use std::io;
-
 use std::io::Cursor;
 use std::marker::Unpin;
 use std::sync::Arc;

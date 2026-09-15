@@ -439,6 +439,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "const_format",
+ "criterion",
  "dialoguer",
  "displaydoc",
  "enum-as-inner",
