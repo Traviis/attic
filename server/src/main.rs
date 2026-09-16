@@ -64,49 +64,56 @@ async fn main() -> Result<()> {
     let telemetry = telemetry::init(opts.tokio_console)?;
     dump_version();
 
-    let config =
-        config::load_config(opts.config.as_deref(), opts.mode == ServerMode::Monolithic).await?;
+    let result = async {
+        let config =
+            config::load_config(opts.config.as_deref(), opts.mode == ServerMode::Monolithic)
+                .await?;
 
-    match opts.mode {
-        ServerMode::Monolithic => {
-            attic_server::run_migrations(config.clone()).await?;
+        match opts.mode {
+            ServerMode::Monolithic => {
+                attic_server::run_migrations(config.clone()).await?;
 
-            let shutdown = run_shutdown_handler();
-            let gc_handle = spawn(attic_server::gc::run_garbage_collection(
-                config.clone(),
-                shutdown.clone(),
-            ));
+                let shutdown = run_shutdown_handler();
+                let gc_handle = spawn(attic_server::gc::run_garbage_collection(
+                    config.clone(),
+                    shutdown.clone(),
+                ));
 
-            let api_server =
-                attic_server::run_api_server(opts.listen, config.clone(), shutdown.clone()).await;
+                let api_server =
+                    attic_server::run_api_server(opts.listen, config.clone(), shutdown.clone())
+                        .await;
 
-            shutdown.cancel();
-            let _ = gc_handle.await;
+                shutdown.cancel();
+                let _ = gc_handle.await;
 
-            api_server?;
+                api_server?;
+            }
+            ServerMode::ApiServer => {
+                let shutdown = run_shutdown_handler();
+                attic_server::run_api_server(opts.listen, config, shutdown).await?;
+            }
+            ServerMode::GarbageCollector => {
+                let shutdown = run_shutdown_handler();
+                attic_server::gc::run_garbage_collection(config.clone(), shutdown).await;
+            }
+            ServerMode::DbMigrations => {
+                attic_server::run_migrations(config).await?;
+            }
+            ServerMode::GarbageCollectorOnce => {
+                attic_server::gc::run_garbage_collection_once(config).await?;
+            }
+            ServerMode::CheckConfig => {
+                // config is valid, let's just exit :)
+            }
         }
-        ServerMode::ApiServer => {
-            let shutdown = run_shutdown_handler();
-            attic_server::run_api_server(opts.listen, config, shutdown).await?;
-        }
-        ServerMode::GarbageCollector => {
-            let shutdown = run_shutdown_handler();
-            attic_server::gc::run_garbage_collection(config.clone(), shutdown).await;
-        }
-        ServerMode::DbMigrations => {
-            attic_server::run_migrations(config).await?;
-        }
-        ServerMode::GarbageCollectorOnce => {
-            attic_server::gc::run_garbage_collection_once(config).await?;
-        }
-        ServerMode::CheckConfig => {
-            // config is valid, let's just exit :)
-        }
+
+        Result::<_, anyhow::Error>::Ok(())
     }
+    .await;
 
-    telemetry.shutdown()?;
-
-    Ok(())
+    let shutdown_result = telemetry.shutdown();
+    result?;
+    shutdown_result
 }
 
 fn run_shutdown_handler() -> CancellationToken {

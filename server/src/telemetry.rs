@@ -84,13 +84,14 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
         });
     }
 
-    let resource = Resource::builder()
-        .with_service_name("atticd")
-        .with_attribute(opentelemetry::KeyValue::new(
-            "service.version",
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .build();
+    let mut resource = Resource::builder().with_attribute(opentelemetry::KeyValue::new(
+        "service.version",
+        env!("CARGO_PKG_VERSION"),
+    ));
+    if !service_name_configured() {
+        resource = resource.with_service_name("atticd");
+    }
+    let resource = resource.build();
 
     let metric_exporter = build_metric_exporter(protocol_for("METRICS")?)?;
     let meter_provider = SdkMeterProvider::builder()
@@ -133,6 +134,16 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
 
 fn telemetry_disabled() -> bool {
     env::var(OTEL_SDK_DISABLED).is_ok_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn service_name_configured() -> bool {
+    env::var("OTEL_SERVICE_NAME").is_ok_and(|value| !value.is_empty())
+        || env::var("OTEL_RESOURCE_ATTRIBUTES").is_ok_and(|attributes| {
+            attributes
+                .split(',')
+                .filter_map(|attribute| attribute.split_once('='))
+                .any(|(key, value)| key.trim() == "service.name" && !value.trim().is_empty())
+        })
 }
 
 fn protocol_for(signal: &str) -> Result<OtlpProtocol> {
