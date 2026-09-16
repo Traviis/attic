@@ -2,14 +2,14 @@
 
 `atticd` can export traces, structured logs, and metrics to an OpenTelemetry collector using OTLP. Export is configured with the standard OpenTelemetry environment variables.
 
-OTLP export is enabled by default. Set `OTEL_SDK_DISABLED=true` to run with local formatted logs only.
+OTLP export is disabled unless a common or signal-specific OTLP endpoint is configured. Set `OTEL_SDK_DISABLED=true` to explicitly disable export even when endpoints are present. Local formatted logs remain enabled in either case.
 
 ## Transport
 
 Attic supports both OTLP over HTTP with protobuf and OTLP over gRPC. HTTP/protobuf is the default.
 
 ```sh
-# Default: HTTP/protobuf
+# Configure an endpoint to enable export. HTTP/protobuf is the default transport.
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 
 # Optional: gRPC
@@ -24,6 +24,15 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 - `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`
 
 Signal-specific settings take precedence over `OTEL_EXPORTER_OTLP_PROTOCOL`.
+
+Export is enabled when any of these endpoint variables has a non-empty value:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+
+When none are configured, Attic does not create exporter workers or attempt connections to the OpenTelemetry SDK's default localhost endpoint.
 
 ## Endpoints and authentication
 

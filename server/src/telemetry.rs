@@ -16,6 +16,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_PROTOCOL: &str = "http/protobuf";
 const OTEL_SDK_DISABLED: &str = "OTEL_SDK_DISABLED";
+const OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 const OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
         None
     };
 
-    if telemetry_disabled() {
+    if !export_configured() {
         tracing_subscriber::registry()
             .with(fmt_layer)
             .with(error_layer)
@@ -93,28 +94,47 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
     }
     let resource = resource.build();
 
-    let metric_exporter = build_metric_exporter(protocol_for("METRICS")?)?;
-    let meter_provider = SdkMeterProvider::builder()
-        .with_resource(resource.clone())
-        .with_periodic_exporter(metric_exporter)
-        .build();
-    global::set_meter_provider(meter_provider.clone());
+    let meter_provider = if signal_export_configured("METRICS") {
+        let metric_exporter = build_metric_exporter(protocol_for("METRICS")?)?;
+        let provider = SdkMeterProvider::builder()
+            .with_resource(resource.clone())
+            .with_periodic_exporter(metric_exporter)
+            .build();
+        global::set_meter_provider(provider.clone());
+        Some(provider)
+    } else {
+        None
+    };
 
-    let logger_provider = SdkLoggerProvider::builder()
-        .with_resource(resource.clone())
-        .with_batch_exporter(build_log_exporter(protocol_for("LOGS")?)?)
-        .build();
-    let log_layer = OpenTelemetryTracingBridge::new(&logger_provider).with_filter(otel_filter());
+    let logger_provider = if signal_export_configured("LOGS") {
+        Some(
+            SdkLoggerProvider::builder()
+                .with_resource(resource.clone())
+                .with_batch_exporter(build_log_exporter(protocol_for("LOGS")?)?)
+                .build(),
+        )
+    } else {
+        None
+    };
+    let log_layer = logger_provider
+        .as_ref()
+        .map(|provider| OpenTelemetryTracingBridge::new(provider).with_filter(otel_filter()));
 
-    let tracer_provider = SdkTracerProvider::builder()
-        .with_resource(resource)
-        .with_batch_exporter(build_span_exporter(protocol_for("TRACES")?)?)
-        .build();
-    global::set_tracer_provider(tracer_provider.clone());
-    let tracer = tracer_provider.tracer("atticd");
-    let trace_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer)
-        .with_filter(otel_filter());
+    let tracer_provider = if signal_export_configured("TRACES") {
+        let provider = SdkTracerProvider::builder()
+            .with_resource(resource)
+            .with_batch_exporter(build_span_exporter(protocol_for("TRACES")?)?)
+            .build();
+        global::set_tracer_provider(provider.clone());
+        Some(provider)
+    } else {
+        None
+    };
+    let trace_layer = tracer_provider.as_ref().map(|provider| {
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("atticd"))
+            .with_filter(otel_filter())
+    });
 
     tracing_subscriber::registry()
         .with(fmt_layer)
@@ -126,14 +146,43 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
         .context("failed to initialize tracing subscriber")?;
 
     Ok(TelemetryGuard {
-        tracer_provider: Some(tracer_provider),
-        logger_provider: Some(logger_provider),
-        meter_provider: Some(meter_provider),
+        tracer_provider,
+        logger_provider,
+        meter_provider,
     })
 }
 
-fn telemetry_disabled() -> bool {
-    env::var(OTEL_SDK_DISABLED).is_ok_and(|value| value.eq_ignore_ascii_case("true"))
+fn export_configured() -> bool {
+    export_enabled(
+        env::var(OTEL_SDK_DISABLED).is_ok_and(|value| value.eq_ignore_ascii_case("true")),
+        non_empty_env(OTLP_ENDPOINT).as_deref(),
+        non_empty_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").as_deref(),
+        non_empty_env("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").as_deref(),
+        non_empty_env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").as_deref(),
+    )
+}
+
+fn signal_export_configured(signal: &str) -> bool {
+    non_empty_env(OTLP_ENDPOINT).is_some()
+        || non_empty_env(&format!("OTEL_EXPORTER_OTLP_{signal}_ENDPOINT")).is_some()
+}
+
+fn export_enabled(
+    sdk_disabled: bool,
+    endpoint: Option<&str>,
+    traces_endpoint: Option<&str>,
+    logs_endpoint: Option<&str>,
+    metrics_endpoint: Option<&str>,
+) -> bool {
+    !sdk_disabled
+        && [endpoint, traces_endpoint, logs_endpoint, metrics_endpoint]
+            .into_iter()
+            .flatten()
+            .any(|endpoint| !endpoint.trim().is_empty())
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
 fn service_name_configured() -> bool {
@@ -205,7 +254,45 @@ fn otel_filter() -> EnvFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::{OtlpProtocol, select_otlp_protocol};
+    use super::{OtlpProtocol, export_enabled, select_otlp_protocol};
+
+    #[test]
+    fn export_is_disabled_without_an_endpoint() {
+        assert!(!export_enabled(false, None, None, None, None));
+    }
+
+    #[test]
+    fn common_endpoint_enables_export() {
+        assert!(export_enabled(
+            false,
+            Some("http://collector:4318"),
+            None,
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn signal_endpoint_enables_export() {
+        assert!(export_enabled(
+            false,
+            None,
+            Some("http://collector:4318/v1/traces"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn sdk_disabled_overrides_endpoints() {
+        assert!(!export_enabled(
+            true,
+            Some("http://collector:4318"),
+            None,
+            None,
+            None
+        ));
+    }
 
     #[test]
     fn defaults_to_http_protobuf() {
