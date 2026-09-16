@@ -3,15 +3,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use attic_server::config;
+use attic_server::telemetry;
 use clap::{Parser, ValueEnum};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::spawn;
 use tokio_util::sync::CancellationToken;
-use tracing_error::ErrorLayer;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::prelude::*;
-
-use attic_server::config;
 
 /// Nix binary cache server.
 #[derive(Debug, Parser)]
@@ -64,7 +61,7 @@ enum ServerMode {
 async fn main() -> Result<()> {
     let opts = Opts::parse();
 
-    init_logging(opts.tokio_console);
+    let telemetry = telemetry::init(opts.tokio_console)?;
     dump_version();
 
     let config =
@@ -107,6 +104,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    telemetry.shutdown()?;
+
     Ok(())
 }
 
@@ -140,31 +139,6 @@ fn run_shutdown_handler() -> CancellationToken {
     });
 
     shutdown
-}
-
-fn init_logging(tokio_console: bool) {
-    let env_filter = EnvFilter::from_default_env();
-    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
-
-    let error_layer = ErrorLayer::default();
-
-    let console_layer = if tokio_console {
-        let (layer, server) = console_subscriber::ConsoleLayer::new();
-        spawn(server.serve());
-        Some(layer)
-    } else {
-        None
-    };
-
-    tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(error_layer)
-        .with(console_layer)
-        .init();
-
-    if tokio_console {
-        eprintln!("Note: tokio-console is enabled");
-    }
 }
 
 fn dump_version() {

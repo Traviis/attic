@@ -25,6 +25,7 @@ mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
 mod storage;
+pub mod telemetry;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
