@@ -34,10 +34,9 @@ async fn run_worker(database: DatabaseConnection, mut receiver: mpsc::Receiver<i
     while let Some(first_id) = receiver.recv().await {
         let object_ids = collect_batch(first_id, &mut receiver, FLUSH_INTERVAL).await;
 
-        for object_id in object_ids {
-            if let Err(error) = database.bump_object_last_accessed(object_id).await {
-                tracing::error!(object_id, %error, "Could not update object access timestamp");
-            }
+        let object_ids = object_ids.into_iter().collect::<Vec<_>>();
+        if let Err(error) = database.bump_objects_last_accessed(&object_ids).await {
+            tracing::error!(object_count = object_ids.len(), %error, "Could not update object access timestamps");
         }
     }
 }
