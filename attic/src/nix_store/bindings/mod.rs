@@ -254,3 +254,61 @@ mod ffi {
         fn ca(self: Pin<&mut CPathInfo>) -> String;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn paused_consumer_applies_backpressure_and_drop_releases_producer() {
+        let (adapter, mut sender) = AsyncWriteAdapter::new();
+        let (finished, mut completion) = tokio::sync::oneshot::channel();
+        let producer = tokio::task::spawn_blocking(move || {
+            let block = vec![42; 64 * 1024];
+            for _ in 0..256 {
+                if sender.send(&block).is_err() {
+                    return;
+                }
+            }
+            let _ = finished.send(());
+        });
+        let result = tokio::time::timeout(Duration::from_millis(200), &mut completion).await;
+        drop(adapter);
+        tokio::time::timeout(Duration::from_secs(5), producer)
+            .await
+            .expect("producer remained blocked after receiver drop")
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "producer buffered the entire paused stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_data_and_completes_at_eof() {
+        let (mut adapter, mut sender) = AsyncWriteAdapter::new();
+        let producer = tokio::task::spawn_blocking(move || {
+            sender.send(b"first").unwrap();
+            sender.send(b"second").unwrap();
+            sender.eof().unwrap();
+        });
+        assert_eq!(adapter.next().await.unwrap().unwrap(), b"first");
+        assert_eq!(adapter.next().await.unwrap().unwrap(), b"second");
+        assert!(adapter.next().await.is_none());
+        producer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_propagates_serializer_error() {
+        let (mut adapter, mut sender) = AsyncWriteAdapter::new();
+        let producer = tokio::task::spawn_blocking(move || {
+            sender
+                .rust_error(io::Error::other("serialization failed"))
+                .unwrap();
+        });
+        let error = adapter.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("serialization failed"));
+        producer.await.unwrap();
+    }
+}
