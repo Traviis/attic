@@ -65,7 +65,6 @@ in
           sqlite-interactive
 
           skopeo
-          manifest-tool
         ];
 
         bench = [

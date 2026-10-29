@@ -27,6 +27,29 @@ And yes, it works on macOS too!
 - **Scalabilty**: Attic can be easily replicated. It's designed to be deployed to serverless platforms like fly.io but also works nicely in a single-machine setup.
 - **Garbage Collection**: Unused store paths can be garbage-collected in an LRU manner.
 
+## OCI images and releases
+
+Build an OCI image archive with Nix:
+
+```sh
+nix build .#attic-server-image
+skopeo copy oci-archive:result docker://registry.example.com/attic:version
+```
+
+`attic-server-image` targets the current Linux platform. On x86_64 Linux,
+`attic-server-image-aarch64` cross-builds the arm64 image. Both archives contain
+`atticd` and `atticadm`, with `/bin/atticd` as the entrypoint. Mount a server
+configuration and pass `-f /path/to/server.toml` to select it explicitly.
+
+Releases are cut manually by pushing a `vMAJOR.MINOR.PATCH` tag. After package,
+unit, and integration jobs succeed, CI publishes an OCI index for amd64 and
+arm64 to `ghcr.io/traviis/attic`, tagged with the full commit SHA and version
+(without `v`), then creates a GitHub Release with generated notes. There are no
+scheduled releases or moving `latest` tags. Pin deployments to a registry digest.
+
+The `docker://` Skopeo transport names the registry protocol; it does not require
+a Docker daemon or convert the OCI manifests to Docker format.
+
 ## Licensing
 
 Attic is available under the **Apache License, Version 2.0**.
