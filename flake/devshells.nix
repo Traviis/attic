@@ -58,6 +58,7 @@ in
         utils = [
           jq
           just
+          python3
         ];
 
         ops = [

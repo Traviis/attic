@@ -41,11 +41,22 @@ skopeo copy oci-archive:result docker://registry.example.com/attic:version
 `atticd` and `atticadm`, with `/bin/atticd` as the entrypoint. Mount a server
 configuration and pass `-f /path/to/server.toml` to select it explicitly.
 
-Releases are cut manually by pushing a `vMAJOR.MINOR.PATCH` tag. After package,
-unit, and integration jobs succeed, CI publishes an OCI index for amd64 and
-arm64 to `ghcr.io/traviis/attic`, tagged with the full commit SHA and version
-(without `v`), then creates a GitHub Release with generated notes. There are no
-scheduled releases or moving `latest` tags. Pin deployments to a registry digest.
+Releases use CalVer `YYYY.M.PATCH` and two manually dispatched Actions workflows:
+
+1. **Prepare release** accepts an optional version. By default it starts the
+   current UTC month at patch zero, or increments the patch within that month.
+   It updates all four Rust packages, their lockfile entries, and the Nix
+   package version, then opens a release PR and dispatches Build for its branch.
+2. Review and merge that PR into `main`.
+3. **Publish release**, run on `main` with the prepared version, runs the Build
+   qualification jobs, checks version agreement and tag availability, and creates
+   a draft GitHub Release. It publishes an amd64/arm64 OCI index to
+   `ghcr.io/traviis/attic`, tagged with the full commit SHA and version, then
+   publishes the GitHub Release. Image failure leaves the release as a draft.
+
+No scheduled releases or moving `latest` tags. Pin deployments to a registry
+digest. Repository Actions settings must permit workflows to create pull
+requests; the repository token needs package publication permission.
 
 The `docker://` Skopeo transport names the registry protocol; it does not require
 a Docker daemon or convert the OCI manifests to Docker format.

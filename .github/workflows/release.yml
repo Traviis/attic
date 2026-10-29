@@ -1,0 +1,89 @@
+name: Publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Prepared CalVer version (YYYY.M.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    uses: ./.github/workflows/build.yml
+    secrets:
+      ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
+      ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
+      ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+  publish:
+    needs: qualify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify prepared release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          version = os.environ['RELEASE_VERSION']
+          pattern = r'[1-9][0-9]{3}\.(?:[1-9]|1[0-2])\.(?:0|[1-9][0-9]*)'
+          if not re.fullmatch(pattern, version):
+              raise SystemExit('Expected YYYY.M.PATCH')
+          for directory in ('attic', 'client', 'server', 'token'):
+              data = tomllib.loads(Path(directory, 'Cargo.toml').read_text())
+              if data['package']['version'] != version:
+                  raise SystemExit(f'{directory}: release version mismatch')
+          PY
+          package_version=$(nix eval --raw .#attic-server.version)
+          [[ "$RELEASE_VERSION" == "$package_version" ]]
+          gh api "repos/$GITHUB_REPOSITORY/tags?per_page=100" \
+            --paginate --jq '.[].name' > tags.txt
+          if grep -Fxq "v$RELEASE_VERSION" tags.txt; then
+            echo "Release tag already exists" >&2
+            exit 1
+          fi
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v$RELEASE_VERSION" --target "$GITHUB_SHA" \
+            --title "v$RELEASE_VERSION" --generate-notes --draft
+      - name: Publish OCI images
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/attic-registry-auth.json"
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf "%s" "$GHCR_TOKEN" | nix develop -c skopeo login \
+            --password-stdin --username "$GITHUB_ACTOR" ghcr.io
+          nix develop -c bash .ci/build-and-push-images.sh \
+            "$image" "$RELEASE_VERSION" "$GITHUB_SHA"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: gh release edit "v$RELEASE_VERSION" --draft=false
