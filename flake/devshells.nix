@@ -58,6 +58,7 @@ in
         utils = [
           jq
           just
+          python3
         ];
 
         ops = [
@@ -65,7 +66,6 @@ in
           sqlite-interactive
 
           skopeo
-          manifest-tool
         ];
 
         bench = [

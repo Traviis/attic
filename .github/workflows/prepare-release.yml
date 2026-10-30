@@ -1,0 +1,65 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: CalVer version (YYYY.M.PATCH); optional
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify release tooling
+        run: nix develop -c python3 .ci/test-prepare-release.py
+      - name: Prepare version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          args=()
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            args+=(--version "$REQUESTED_VERSION")
+          fi
+          version=$(python3 .ci/prepare-release.py "${args[@]}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Open release pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          branch="release/v$VERSION"
+          title="release: prepare v$VERSION"
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add Cargo.lock attic/Cargo.toml client/Cargo.toml \
+            server/Cargo.toml token/Cargo.toml crane.nix
+          git commit -m "$title"
+          git push origin "$branch"
+          body="Prepares Attic v$VERSION. Merge after review,"
+          body+=" then run Publish release for this version."
+          gh pr create --base main --head "$branch" --title "$title" \
+            --body "$body"
+          gh workflow run build.yml --ref "$branch"

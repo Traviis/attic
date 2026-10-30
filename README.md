@@ -27,6 +27,40 @@ And yes, it works on macOS too!
 - **Scalabilty**: Attic can be easily replicated. It's designed to be deployed to serverless platforms like fly.io but also works nicely in a single-machine setup.
 - **Garbage Collection**: Unused store paths can be garbage-collected in an LRU manner.
 
+## OCI images and releases
+
+Build an OCI image archive with Nix:
+
+```sh
+nix build .#attic-server-image
+skopeo copy oci-archive:result docker://registry.example.com/attic:version
+```
+
+`attic-server-image` targets the current Linux platform. On x86_64 Linux,
+`attic-server-image-aarch64` cross-builds the arm64 image. Both archives contain
+`atticd` and `atticadm`, with `/bin/atticd` as the entrypoint. Mount a server
+configuration and pass `-f /path/to/server.toml` to select it explicitly.
+
+Releases use CalVer `YYYY.M.PATCH` and two manually dispatched Actions workflows:
+
+1. **Prepare release** accepts an optional version. By default it starts the
+   current UTC month at patch zero, or increments the patch within that month.
+   It updates all four Rust packages, their lockfile entries, and the Nix
+   package version, then opens a release PR and dispatches Build for its branch.
+2. Review and merge that PR into `main`.
+3. **Publish release**, run on `main` with the prepared version, runs the Build
+   qualification jobs, checks version agreement and tag availability, and creates
+   a draft GitHub Release. It publishes an amd64/arm64 OCI index to
+   `ghcr.io/traviis/attic`, tagged with the full commit SHA and version, then
+   publishes the GitHub Release. Image failure leaves the release as a draft.
+
+No scheduled releases or moving `latest` tags. Pin deployments to a registry
+digest. Repository Actions settings must permit workflows to create pull
+requests; the repository token needs package publication permission.
+
+The `docker://` Skopeo transport names the registry protocol; it does not require
+a Docker daemon or convert the OCI manifests to Docker format.
+
 ## Licensing
 
 Attic is available under the **Apache License, Version 2.0**.
