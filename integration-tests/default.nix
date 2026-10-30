@@ -45,4 +45,8 @@ let
   }) (lib.cartesianProduct matrix));
 in {
   access-update-performance = runTest ./access-update-performance;
+  lix = runTest {
+    imports = [ ./basic ];
+    storeImplementation = "lix";
+  };
 } // basicTests

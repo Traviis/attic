@@ -143,6 +143,10 @@ in {
       type = types.enum [ "sqlite" "postgres" ];
       default = "sqlite";
     };
+    storeImplementation = lib.mkOption {
+      type = types.enum [ "nix" "lix" ];
+      default = "nix";
+    };
     storage = lib.mkOption {
       type = types.enum [ "local" "garage" ];
       default = "local";
@@ -150,7 +154,7 @@ in {
   };
 
   config = {
-    name = "basic-${config.database}-${config.storage}";
+    name = "basic-${config.database}-${config.storage}${lib.optionalString (config.storeImplementation == "lix") "-lix"}";
 
     nodes = {
       server = {
@@ -188,7 +192,14 @@ in {
       };
 
       client = {
-        environment.systemPackages = [ pkgs.attic pkgs.python3 ];
+        nix.package = lib.mkIf (config.storeImplementation == "lix") (lib.mkForce pkgs.lix);
+        environment.variables = lib.mkIf (config.storeImplementation == "lix") {
+          NIX_REMOTE = "daemon";
+        };
+        environment.systemPackages = [
+          (if config.storeImplementation == "lix" then pkgs.attic-client else pkgs.attic)
+          pkgs.python3
+        ];
       };
 
       proxy = {
@@ -238,6 +249,16 @@ in {
       ${databaseModules.${config.database}.testScript or ""}
       ${storageModules.${config.storage}.testScript or ""}
 
+      ${lib.optionalString (config.storeImplementation == "lix") ''
+      with subtest("Unchanged Attic client uses the Lix daemon"):
+          client.succeed("systemctl start nix-daemon.service")
+          client.wait_for_unit("nix-daemon.service")
+          assert "Lix" in client.succeed("nix --version")
+          assert "Lix" in client.succeed("nix-daemon --version")
+          assert client.succeed("readlink -f /run/current-system/sw/bin/attic").strip() == "${pkgs.attic-client}/bin/attic"
+          client.succeed("systemctl show nix-daemon.service --property=ExecStart | grep -F '${pkgs.lix}'")
+      ''}
+
       server.wait_for_unit('atticd.service')
       proxy.wait_for_unit('nginx.service')
       client.wait_until_succeeds("curl -sL http://server:8080", timeout=40)
@@ -282,6 +303,14 @@ in {
           assert client.succeed("attic cache list root") == "hidden-cache\nprivate-cache\ntest\n"
           assert client.succeed("attic cache list anon") == ""
 
+      ${lib.optionalString (config.storeImplementation == "lix") ''
+      with subtest("Attic cannot bypass the selected Lix daemon"):
+          client.succeed("systemctl stop nix-daemon.service nix-daemon.socket")
+          status, output = client.execute("attic push compressed:test /run/current-system 2>&1")
+          assert status != 0 and "daemon" in output.lower(), output
+          client.succeed("systemctl start nix-daemon.socket nix-daemon.service")
+      ''}
+
       with subtest("Check that a negotiated upload is compressed"):
           client.succeed("${makeTestDerivation} test.nix")
           test_file = client.succeed("nix-build --no-out-link test.nix").strip()
@@ -294,7 +323,7 @@ in {
 
       with subtest("Check that we can pull a compressed upload"):
           client.succeed("attic use readonly:test")
-          client.succeed(f"nix-store -r {test_file}")
+          client.succeed(f"nix-store -r {test_file} --option substituters http://server:8080/test")
           client.succeed(f"grep hello {test_file}")
 
       with subtest("Check that we can list enabled caches"):
@@ -370,8 +399,31 @@ in {
       with subtest("Check that we can pull the paths back"):
           for path in paths:
               client.fail(f"ls {path}")
-              client.succeed(f"nix-store -r {path}")
+              client.succeed(f"nix-store -r {path} --option substituters http://server:8080/test")
               client.succeed(f"grep hello {path}")
+
+      ${lib.optionalString (config.storeImplementation == "lix") ''
+      with subtest("Lix restores a multi-chunk closure uploaded by the unchanged client"):
+          client.succeed("mkdir -p /tmp/closure-dependency /tmp/closure-root; printf dependency >/tmp/closure-dependency/content")
+          dependency = client.succeed("nix-store --add /tmp/closure-dependency").strip()
+          client.succeed(f"printf '%s' '{dependency}' >/tmp/closure-root/reference; ln -s '{dependency}/content' /tmp/closure-root/link; head -c 4194304 /dev/urandom >/tmp/closure-root/payload; chmod +x /tmp/closure-root/payload")
+          expression = 'derivation { name = "closure-root"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "exec /bin/sh $script" ]; script = builtins.toFile "closure-builder" "#!/bin/sh\\n/run/current-system/sw/bin/mkdir -p $out\\n/run/current-system/sw/bin/cp -a /tmp/closure-root/. $out/\\n"; dependency = builtins.storePath "' + dependency + '"; }'
+          client.succeed(f"printf %s {shlex.quote(expression)} >/tmp/closure.nix")
+          root = client.succeed("nix-build /tmp/closure.nix --no-out-link --option sandbox false --option substituters http://server:8080/test").strip()
+          closure = client.succeed(f"nix-store -qR {root}").splitlines()
+          assert dependency in closure, closure
+          hashes = {path: client.succeed(f"nix-store -q --hash {path}").strip() for path in closure}
+          client.succeed(f"attic push compressed:test {root}")
+          client.succeed(f"attic push compressed:test {root}")
+          client.succeed(f"nix-store --delete {root} {dependency}")
+          for path in closure:
+              client.fail(f"test -e {path}")
+          client.succeed(f"nix-store --realise {root} --option substituters http://server:8080/test --option fallback false --option narinfo-cache-negative-ttl 0")
+          for path, expected in hashes.items():
+              assert client.succeed(f"nix-store -q --hash {path}").strip() == expected
+              client.succeed(f"nix-store --verify-path {path}")
+          client.succeed(f"test -x {root}/payload; test -L {root}/link; cmp {root}/link {dependency}/content")
+      ''}
 
       with subtest("Check that we can make the cache public"):
           client.fail("curl -sL --fail-with-body http://server:8080/test/nix-cache-info")
@@ -402,7 +454,7 @@ in {
           client.succeed(f"attic push --force-preamble compressed:test {test2_file}")
           proxy.succeed("grep -E '^PUT /_api/v1/upload-path zstd$' /var/log/nginx/compressed.log")
           client.succeed(f"nix-store --delete {test2_file}")
-          client.succeed(f"nix-store -r {test2_file}")
+          client.succeed(f"nix-store -r {test2_file} --option substituters http://server:8080/test")
 
       with subtest("Check that we can destroy the cache"):
           client.succeed("attic cache info test")
