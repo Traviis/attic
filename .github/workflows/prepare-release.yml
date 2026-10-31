@@ -30,6 +30,22 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            keep-derivations = true
+            keep-outputs = true
+      - name: Restore and save Nix store
+        # v7
+        uses: >-
+          nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: >-
+            nix-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{
+            strategy.job-index || 0 }}-${{ hashFiles('flake.lock') }}-${{
+            github.run_id }}-${{ github.run_attempt }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ strategy.job-index || 0 }}-
+          gc-max-store-size: 5G
+
       - name: Verify release tooling
         run: nix develop -c python3 .ci/test-prepare-release.py
       - name: Prepare version
