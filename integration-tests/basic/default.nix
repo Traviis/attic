@@ -311,6 +311,28 @@ in {
           client.succeed("systemctl start nix-daemon.socket nix-daemon.service")
       ''}
 
+      with subtest("Cache configuration preserves retention unless explicitly changed"):
+          client.succeed("attic cache configure test --retention-period 7d")
+          configure_token = server.succeed("${cmd.atticadm} make-token --sub 'configure-only' --validity '1 hour' --configure-cache 'test' </dev/null").strip()
+          client.succeed(f"attic login configure-only http://server:8080 {configure_token}")
+          client.succeed("attic cache configure configure-only:test --priority 42")
+          client.succeed("attic cache configure test --priority 43")
+
+          def retention():
+              result = client.succeed(f"curl -sS --fail-with-body -H 'Authorization: Bearer {root_token}' http://server:8080/_api/v1/cache-config/test")
+              return json.loads(result)["retention_period"]
+
+          assert retention() == {"Period": 604800}
+          client.succeed("attic cache configure test --retention-period 3d")
+          assert retention() == {"Period": 259200}
+          client.succeed("attic cache configure test --reset-retention-period")
+          assert retention() == "Global"
+          status, output = client.execute("attic cache configure configure-only:test --retention-period 1d 2>&1")
+          assert status != 0 and "AccessError" in output, output
+          status, output = client.execute("attic cache configure test --retention-period 1d --reset-retention-period 2>&1")
+          assert status != 0 and "cannot be set at the same time" in output, output
+          assert retention() == "Global"
+
       with subtest("Check that a negotiated upload is compressed"):
           client.succeed("${makeTestDerivation} test.nix")
           test_file = client.succeed("nix-build --no-out-link test.nix").strip()

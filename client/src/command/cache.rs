@@ -366,7 +366,7 @@ async fn configure_cache(sub: Configure) -> Result<()> {
 
     if let Some(period) = sub.retention_period {
         patch.retention_period = Some(RetentionPeriodConfig::Period(period.as_secs() as u32));
-    } else {
+    } else if sub.reset_retention_period {
         patch.retention_period = Some(RetentionPeriodConfig::Global);
     }
 
