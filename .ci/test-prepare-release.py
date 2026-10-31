@@ -32,8 +32,11 @@ class ReleaseTests(unittest.TestCase):
             shutil.copytree(ROOT / directory / "src", self.root / directory / "src")
 
     def test_prepares_all_packages_and_cargo_accepts_lockfile(self):
-        version = RELEASE.prepare(self.root, today=datetime.date(2026, 10, 1))
-        self.assertEqual(version, "2026.10.0")
+        current = tomllib.loads((self.root / RELEASE.MANIFESTS[0]).read_text())
+        year = int(current["package"]["version"].split(".")[0]) + 1
+        RELEASE.prepare(self.root, f"{year}.9.0")
+        version = RELEASE.prepare(self.root, today=datetime.date(year, 10, 1))
+        self.assertEqual(version, f"{year}.10.0")
         for manifest in RELEASE.MANIFESTS:
             data = tomllib.loads((self.root / manifest).read_text())
             self.assertEqual(data["package"]["version"], version)
@@ -63,10 +66,10 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            RELEASE.prepare(self.root, today=datetime.date(2026, 10, 2)), "2026.10.1"
+            RELEASE.prepare(self.root, today=datetime.date(year, 10, 2)), f"{year}.10.1"
         )
         self.assertEqual(
-            RELEASE.prepare(self.root, today=datetime.date(2026, 11, 1)), "2026.11.0"
+            RELEASE.prepare(self.root, today=datetime.date(year, 11, 1)), f"{year}.11.0"
         )
 
     def test_invalid_or_inconsistent_input_changes_no_files(self):
