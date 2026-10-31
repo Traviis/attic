@@ -44,7 +44,8 @@ class SelectionTests(unittest.TestCase):
 
     def test_full_excludes_benchmarks(self):
         matrix, rust = checks.select(self.matrix, full=True)
-        self.assertEqual(len(matrix["include"]), 10)
+        self.assertEqual(len(matrix["include"]), 9)
+        self.assertNotIn("stable-lix", {entry["name"] for entry in matrix["include"]})
         self.assertEqual(len(rust["include"]), 10)
         self.assertFalse(checks.BENCHMARKS & {entry["name"] for entry in matrix["include"]})
 
@@ -53,7 +54,9 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual({entry["name"] for entry in matrix["include"]},
                          checks.ROUTINE | checks.BENCHMARKS)
         matrix, _ = checks.select(self.matrix, full=True, benchmarks=True)
-        self.assertEqual(matrix, self.matrix)
+        self.assertEqual(matrix, {"include": [
+            entry for entry in self.matrix["include"] if entry["name"] != "stable-lix"
+        ]})
 
     def test_missing_required_check_fails(self):
         with self.assertRaisesRegex(ValueError, "Missing routine checks"):

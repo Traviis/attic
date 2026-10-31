@@ -17,8 +17,9 @@ def select(matrix, full=False, benchmarks=False):
         raise ValueError(f"Missing routine checks: {sorted(missing)}")
     checks = [
         entry for entry in matrix["include"]
-        if (entry["name"] in BENCHMARKS and benchmarks)
-        or (entry["name"] not in BENCHMARKS and (full or entry["name"] in ROUTINE))
+        if entry["name"] != "stable-lix"
+        and ((entry["name"] in BENCHMARKS and benchmarks)
+             or (entry["name"] not in BENCHMARKS and (full or entry["name"] in ROUTINE)))
     ]
     rust = [
         {"os": "ubuntu-latest", "nix": "default"},

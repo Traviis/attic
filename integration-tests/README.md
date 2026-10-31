@@ -24,9 +24,11 @@ fixture's build queries the cache before its first upload.
 
 Both `lix` and `stable-lix` are available as flake checks. Routine CI runs
 `basic-sqlite-local`, `basic-postgres-garage`, and `lix`. Manual Build dispatch
-with `full` enabled, and release qualification, run all ten functional VM
-variants, including stable nixpkgs. Their Lix versions follow their respective
-locked nixpkgs inputs.
+with `full` enabled, and release qualification, run nine functional VM
+variants, including stable nixpkgs database/storage variants. `stable-lix` is
+excluded from every CI mode to avoid redundant Lix/toolchain source builds;
+it remains directly runnable as a flake check. Lix versions follow their
+respective locked nixpkgs inputs.
 
 Routine Rust tests run on Linux/default, macOS/default, and Linux/Nix 2.28.
 Full qualification tests all five listed Nix versions on both platforms.
