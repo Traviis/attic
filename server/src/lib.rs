@@ -333,7 +333,13 @@ async fn track_http_metrics(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let request_metrics = metrics::start_http_request(request.method().as_str());
+    // MatchedPath is a router template, never a user-supplied cache name or hash.
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| path.as_str())
+        .unwrap_or("unmatched");
+    let request_metrics = metrics::start_http_request(request.method().as_str(), route);
     let response = next.run(request).await;
     request_metrics.finish(response.status());
     response
