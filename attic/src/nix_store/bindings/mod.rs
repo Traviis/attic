@@ -55,6 +55,7 @@ mod mpsc {
 /// memory, so pushing a large store path grows RSS linearly with its size —
 /// a multi-gigabyte path is enough to get the client OOM-killed.
 const NAR_CHANNEL_CAPACITY: usize = 64;
+const NAR_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Async write request.
 #[derive(Debug)]
@@ -74,15 +75,36 @@ enum AsyncWriteMessage {
 #[derive(Clone)]
 pub struct AsyncWriteSender {
     sender: mpsc::Sender<AsyncWriteMessage>,
+    buf: Vec<u8>,
 }
 
 impl AsyncWriteSender {
     fn send(&mut self, data: &[u8]) -> Result<(), mpsc::SendError<AsyncWriteMessage>> {
-        let message = AsyncWriteMessage::Data(Vec::from(data));
-        self.sender.blocking_send(message)
+        let mut rest = data;
+        while !rest.is_empty() {
+            if self.buf.capacity() == 0 {
+                self.buf.reserve_exact(NAR_CHUNK_SIZE);
+            }
+            let take = (NAR_CHUNK_SIZE - self.buf.len()).min(rest.len());
+            self.buf.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            if self.buf.len() == NAR_CHUNK_SIZE {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), mpsc::SendError<AsyncWriteMessage>> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buf);
+        self.sender.blocking_send(AsyncWriteMessage::Data(chunk))
     }
 
     fn eof(&mut self) -> Result<(), mpsc::SendError<AsyncWriteMessage>> {
+        self.flush()?;
         let message = AsyncWriteMessage::Eof;
         self.sender.blocking_send(message)
     }
@@ -110,7 +132,10 @@ impl AsyncWriteAdapter {
             receiver,
             eof: false,
         };
-        let sender = Box::new(AsyncWriteSender { sender });
+        let sender = Box::new(AsyncWriteSender {
+            sender,
+            buf: Vec::new(),
+        });
 
         (r, sender)
     }
@@ -300,6 +325,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_writes_are_coalesced_and_eof_flushes_remainder() {
+        let (mut adapter, mut sender) = AsyncWriteAdapter::new();
+        let producer = tokio::task::spawn_blocking(move || {
+            for _ in 0..(64 * 1024 + 17) {
+                sender.send(b"x").unwrap();
+            }
+            sender.eof().unwrap();
+        });
+        let full = adapter.next().await.unwrap().unwrap();
+        assert_eq!(full.len(), 64 * 1024);
+        assert!(full.iter().all(|byte| *byte == b'x'));
+        let remainder = adapter.next().await.unwrap().unwrap();
+        assert_eq!(remainder.len(), 17);
+        assert!(remainder.iter().all(|byte| *byte == b'x'));
+        assert!(adapter.next().await.is_none());
+        producer.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stream_preserves_data_and_completes_at_eof() {
         let (mut adapter, mut sender) = AsyncWriteAdapter::new();
         let producer = tokio::task::spawn_blocking(move || {
@@ -307,8 +351,11 @@ mod tests {
             sender.send(b"second").unwrap();
             sender.eof().unwrap();
         });
-        assert_eq!(adapter.next().await.unwrap().unwrap(), b"first");
-        assert_eq!(adapter.next().await.unwrap().unwrap(), b"second");
+        let mut bytes = Vec::new();
+        while let Some(block) = adapter.next().await {
+            bytes.extend(block.unwrap());
+        }
+        assert_eq!(bytes, b"firstsecond");
         assert!(adapter.next().await.is_none());
         producer.await.unwrap();
     }
@@ -317,6 +364,7 @@ mod tests {
     async fn stream_propagates_serializer_error() {
         let (mut adapter, mut sender) = AsyncWriteAdapter::new();
         let producer = tokio::task::spawn_blocking(move || {
+            sender.send(b"unfinished").unwrap();
             sender
                 .rust_error(io::Error::other("serialization failed"))
                 .unwrap();
