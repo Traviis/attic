@@ -73,6 +73,8 @@ Attic currently emits:
 - `attic.operation.duration`
 - `attic.operation.bytes`
 
-Operation attributes distinguish uploads, downloads, database connection and migration work, garbage collection runs, and garbage-collected object types. HTTP metrics use method and status attributes; request paths and cache names are intentionally excluded from metric attributes to prevent unbounded cardinality.
+Operation attributes distinguish uploads, downloads, database connection and migration work, garbage collection runs, and garbage-collected object types. HTTP metrics use method, status, and `http.route` attributes. Routes are Axum templates (or `unmatched`), never raw request paths or cache names. Active requests count handlers until response headers, not streaming bodies, and are balanced on cancellation. Duration histograms use explicit second-scale buckets for useful latency quantiles.
+
+`attic.operation.count` also records `operation.name=upload.objects`, with `upload.kind` and `operation.outcome` for object-based deduplication ratios. Upload byte samples carry those same attributes; filter to successful outcomes for logical accepted bytes. Upload operations exclude failures before metadata parsing and authorization complete. Download counts and NAR bytes describe prepared responses before storage is opened; they are not successful stream completions or wire byte totals. Deduplicated upload bytes represent logical NAR size, not storage savings. Do not sum all operation counts as requests: they include runs, uploads, and processed objects.
 
 Telemetry providers are flushed during orderly `atticd` shutdown.

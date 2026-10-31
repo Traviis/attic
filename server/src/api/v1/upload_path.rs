@@ -218,10 +218,21 @@ fn record_upload(
 ) {
     let outcome = if result.is_ok() { "success" } else { "error" };
     metrics::record_operation("upload", outcome, started_at.elapsed());
+    metrics::add_count(
+        "upload.objects",
+        1,
+        &[
+            opentelemetry::KeyValue::new("upload.kind", kind),
+            opentelemetry::KeyValue::new("operation.outcome", outcome),
+        ],
+    );
     metrics::add_bytes(
         "upload.nar",
         nar_size as u64,
-        &[opentelemetry::KeyValue::new("upload.kind", kind)],
+        &[
+            opentelemetry::KeyValue::new("upload.kind", kind),
+            opentelemetry::KeyValue::new("operation.outcome", outcome),
+        ],
     );
     tracing::info!(
         upload.kind = kind,
