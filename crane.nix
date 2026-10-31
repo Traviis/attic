@@ -20,7 +20,7 @@
 }:
 
 let
-  version = "2026.10.2";
+  version = "2026.10.3";
 
   ignoredPaths = [
     ".ci"
