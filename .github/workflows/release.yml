@@ -18,6 +18,8 @@ concurrency:
 jobs:
   qualify:
     uses: ./.github/workflows/build.yml
+    with:
+      full: true
     secrets:
       ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
       ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}

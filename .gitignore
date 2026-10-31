@@ -1,6 +1,7 @@
 .direnv
 
 /target
+__pycache__/
 result*
 untracked
 

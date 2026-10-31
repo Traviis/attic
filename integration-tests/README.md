@@ -22,8 +22,20 @@ from Attic, and verifies NAR hashes, dependency presence, executable mode, and a
 symlink. Negative narinfo caching is disabled for that restoration because the
 fixture's build queries the cache before its first upload.
 
-Both `lix` and `stable-lix` are included in flake checks and the existing CI
-matrix. Their Lix versions follow their respective locked nixpkgs inputs.
+Both `lix` and `stable-lix` are available as flake checks. Routine CI runs
+`basic-sqlite-local`, `basic-postgres-garage`, and `lix`. Manual Build dispatch
+with `full` enabled, and release qualification, run all ten functional VM
+variants, including stable nixpkgs. Their Lix versions follow their respective
+locked nixpkgs inputs.
+
+Routine Rust tests run on Linux/default, macOS/default, and Linux/Nix 2.28.
+Full qualification tests all five listed Nix versions on both platforms.
+WebAssembly builds once on Linux/default in either mode. Package builds on
+Linux/macOS are unchanged.
+
+Performance checks run only when the manual Build dispatch explicitly enables
+`benchmarks`; `full` alone does not enable them. Both performance checks also
+remain directly runnable through their flake check attributes.
 
 Local qualification passed with Lix 2.94.2 from the primary input and with the
 Nix baseline. The stable-input check was blocked before VM execution by the
