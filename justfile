@@ -41,7 +41,9 @@ ci-unit-tests matrix:
 	system=$(nix-instantiate --eval -E 'builtins.currentSystem')
 	tests=$(nix build .#internalMatrix."$system".\"{{ matrix }}\".attic-tests --no-link --print-out-paths -L)
 	for test in "$tests"/bin/*; do
-		"$test"
+		if [[ "$(basename "$test")" =~ -[0-9a-f]{16}$ ]]; then
+			"$test"
+		fi
 	done
 
 # (CI) Run rustfmt check
