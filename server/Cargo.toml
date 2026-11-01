@@ -1,6 +1,6 @@
 [package]
 name = "attic-server"
-version = "2026.10.3"
+version = "2026.11.0"
 edition = "2024"
 publish = false
 
