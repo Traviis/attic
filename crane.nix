@@ -169,7 +169,7 @@ let
       runHook preInstall
 
       mkdir -p $out/bin
-      jq -r 'select(.reason == "compiler-artifact" and .target.test and .executable) | .executable' <cargo-test.json | \
+      jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable) | .executable' <cargo-test.json | \
         xargs -I _ cp _ $out/bin
 
       runHook postInstall
