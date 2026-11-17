@@ -90,6 +90,37 @@ pub(crate) async fn upload_path(
     headers: HeaderMap,
     body: Body,
 ) -> ServerResult<Json<UploadPathResult>> {
+    let enabled = state
+        .config
+        .upload_audit
+        .unwrap_or_else(crate::audit::configured);
+    let subject = req_state.auth.username();
+    let mut audit = enabled.then(|| serde_json::json!({
+        "cache": "", "store_path": "", "nar_hash": "", "nar_size": 0,
+        "token.sub": subject,
+        "token.jti": req_state.auth.token.get().and_then(|token| serde_json::to_value(token.opaque_claims()).ok()).and_then(|claims| claims.get("jti").cloned()),
+        "client.address": req_state.client_address,
+        "signatures": [], "signatures.valid_count": 0,
+        "min-signatures": state.config.upload_verification.min_signatures,
+        "policy_hook.decision": "not_configured", "policy_hook.reason": "",
+        "deduplicated": false,
+    }));
+    let result = upload_path_inner(state, req_state, headers, body, &mut audit).await;
+    let deduplicated = audit
+        .as_ref()
+        .and_then(|a| a["deduplicated"].as_bool())
+        .unwrap_or(false);
+    record_decision(&result, &audit, deduplicated);
+    result
+}
+
+async fn upload_path_inner(
+    state: State,
+    req_state: RequestState,
+    headers: HeaderMap,
+    body: Body,
+    audit: &mut Option<serde_json::Value>,
+) -> ServerResult<Json<UploadPathResult>> {
     let started_at = Instant::now();
     let stream = body.into_data_stream();
     let stream = StreamReader::new(stream.map(|r| r.map_err(|e| io::Error::other(e.to_string()))));
@@ -153,6 +184,12 @@ pub(crate) async fn upload_path(
             return Err(ErrorKind::RequestError(anyhow!("{} must be set", ATTIC_NAR_INFO)).into());
         }
     };
+    if let Some(audit) = audit {
+        audit["cache"] = upload_info.cache.as_str().into();
+        audit["store_path"] = upload_info.store_path.clone().into();
+        audit["nar_hash"] = upload_info.nar_hash.to_typed_base16().into();
+        audit["nar_size"] = upload_info.nar_size.into();
+    }
     let cache_name = &upload_info.cache;
 
     let database = state.database().await?;
@@ -171,40 +208,25 @@ pub(crate) async fn upload_path(
         username.as_deref(),
         Utc::now(),
     );
+    let nar_size = upload_info.nar_size;
+    if let Some(audit) = audit {
+        audit["signatures"] = serde_json::to_value(&decision.signatures).unwrap_or_default();
+        audit["signatures.valid_count"] = decision.valid_count.into();
+    }
     if let Some(reason) = &decision.reason {
-        let statuses =
-            serde_json::to_string(&decision.signatures).map_err(ServerError::request_error)?;
-        tracing::warn!(
-            cache = %upload_info.cache,
-            store_path = %upload_info.store_path,
-            reason,
-            signatures = %statuses,
-            "Upload rejected"
-        );
         let statuses = decision
             .signatures
             .iter()
             .map(|signature| format!("{}={:?}", signature.key_name, signature.status))
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(ErrorKind::UploadRejected(format!(
+        let result = Err(ErrorKind::UploadRejected(format!(
             "{}: {}; signatures: {}",
             upload_info.store_path, reason, statuses
         ))
         .into());
+        return result;
     }
-
-    let nar_size = upload_info.nar_size;
-    let audit = serde_json::json!({
-        "cache": upload_info.cache.as_str(),
-        "store_path": upload_info.store_path,
-        "nar_hash": upload_info.nar_hash.to_typed_base16(),
-        "nar_size": nar_size,
-        "token.sub": username,
-        "signatures": decision.signatures,
-        "signatures.valid_count": decision.valid_count,
-        "min-signatures": state.config.upload_verification.min_signatures,
-    });
 
     // Try to acquire a lock on an existing NAR
     if let Some(existing_nar) = database.find_and_lock_nar(&upload_info.nar_hash).await? {
@@ -220,6 +242,9 @@ pub(crate) async fn upload_path(
 
         if missing_chunk.is_none() {
             // Can actually be deduplicated
+            if let Some(audit) = audit {
+                audit["deduplicated"] = true.into();
+            }
             let result = upload_path_dedup(
                 username,
                 cache,
@@ -231,7 +256,6 @@ pub(crate) async fn upload_path(
             )
             .await;
             record_upload(&result, nar_size, "deduplicated", started_at);
-            record_decision(&result, &audit, true);
             return result;
         }
     }
@@ -246,22 +270,42 @@ pub(crate) async fn upload_path(
         })
         .unwrap_or("error");
     record_upload(&result, nar_size, kind, started_at);
-    record_decision(&result, &audit, kind == "deduplicated");
     result
 }
 
 fn record_decision(
     result: &ServerResult<Json<UploadPathResult>>,
-    audit: &serde_json::Value,
+    audit: &Option<serde_json::Value>,
     deduplicated: bool,
 ) {
+    let Some(mut audit) = audit.clone() else {
+        return;
+    };
     let event = if result.is_ok() {
         "upload.accepted"
     } else {
         "upload.rejected"
     };
     let reason = result.as_ref().err().map(ToString::to_string);
-    tracing::info!(target: "attic.audit", event, deduplicated, reason, details = %audit, "Upload decision");
+    audit["event"] = event.into();
+    if let Err(error) = result
+        && let ErrorKind::UploadOverwriteRejected(rejection) = error.kind()
+    {
+        audit["event"] = "upload.overwrite_rejected".into();
+        audit["existing.nar_hash"] = rejection.existing_hash.as_str().into();
+        audit["incoming.nar_hash"] = rejection.incoming_hash.as_str().into();
+        audit["existing.uploader"] = rejection.existing_uploader.as_deref().into();
+        audit["incoming.uploader"] = rejection.incoming_uploader.as_deref().into();
+    }
+    audit["outcome"] = if result.is_ok() {
+        "accepted"
+    } else {
+        "rejected"
+    }
+    .into();
+    audit["reason"] = reason.unwrap_or_default().into();
+    audit["deduplicated"] = deduplicated.into();
+    crate::audit::emit(&audit);
 }
 
 fn record_upload(
@@ -429,7 +473,16 @@ async fn upload_path_new_chunked(
         }
     });
 
-    let stream = stream.take(upload_info.nar_size as u64);
+    let limit = if state
+        .config
+        .upload_verification
+        .enabled_for_cache(upload_info.cache.as_str())
+    {
+        u64::MAX
+    } else {
+        upload_info.nar_size as u64
+    };
+    let stream = stream.take(limit);
     let (stream, nar_compute) = HashReader::new(stream, Sha256::new());
     let mut chunks = chunk_stream(
         stream,
@@ -565,7 +618,16 @@ async fn upload_path_new_unchunked(
     let compression: Compression = compression_type.into();
 
     // Upload the entire NAR as a single chunk
-    let stream = stream.take(upload_info.nar_size as u64);
+    let limit = if state
+        .config
+        .upload_verification
+        .enabled_for_cache(upload_info.cache.as_str())
+    {
+        u64::MAX
+    } else {
+        upload_info.nar_size as u64
+    };
+    let stream = stream.take(limit);
     let data = ChunkData::Stream(
         Box::new(stream),
         upload_info.nar_hash.clone(),
@@ -655,6 +717,7 @@ async fn store_object(
         .config
         .upload_verification
         .enabled_for_cache(upload.cache.as_str())
+        && !state.config.protect_path_overwrites
     {
         Object::insert(model)
             .on_conflict_do_update()
@@ -701,6 +764,18 @@ async fn store_object(
                 .await
                 .map_err(ServerError::database_error)?;
             return Ok(());
+        }
+        if state.config.protect_path_overwrites {
+            return Err(ErrorKind::UploadOverwriteRejected(Box::new(
+                crate::error::OverwriteRejection {
+                    store_path: upload.store_path.clone(),
+                    existing_hash: nar.nar_hash,
+                    incoming_hash: upload.nar_hash.to_typed_base16(),
+                    existing_uploader: existing.created_by,
+                    incoming_uploader: model.created_by.take().flatten(),
+                },
+            ))
+            .into());
         }
     }
     Object::insert(model)
@@ -940,9 +1015,18 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let temp = tempfile::tempdir().unwrap();
+        let database_url = std::env::var("ATTIC_TEST_DATABASE_URL").unwrap_or_else(|_| {
+            format!(
+                "sqlite://{}?mode=rwc",
+                temp.path().join("test.db").display()
+            )
+        });
         let template = include_str!("../../config-template.toml")
-            .replace("%database_url%", "sqlite::memory:")
-            .replace("%storage_path%", temp.path().to_str().unwrap())
+            .replace("%database_url%", &database_url)
+            .replace(
+                "%storage_path%",
+                temp.path().join("storage").to_str().unwrap(),
+            )
             .replace(
                 "token-rs256-secret-base64 = \"%token_rs256_secret_base64%\"",
                 "token-hs256-secret-base64 = \"dGVzdA==\"",
@@ -950,12 +1034,20 @@ mod tests {
         let key = NixKeypair::generate("alice").unwrap();
         let mut config: crate::config::Config = toml::from_str(&template).unwrap();
         config.require_proof_of_possession = false;
+        config.protect_path_overwrites = true;
+        config.upload_audit = Some(true);
+        let exporter = opentelemetry_sdk::logs::InMemoryLogExporter::default();
+        let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        crate::audit::install(&provider);
         config.chunking.nar_size_threshold = 0;
         config.upload_verification = toml::from_str(&format!(
             "enabled=true\ntrusted-public-keys=[{:?}]",
             key.export_public_key()
         ))
         .unwrap();
+        assert_eq!(config.database.url, database_url);
         let state = StateInner::new(config).await;
         let database = state.database().await.unwrap();
         Migrator::up(database, None).await.unwrap();
@@ -982,6 +1074,7 @@ mod tests {
         auth.token.set(token).unwrap();
         let request = Arc::new(RequestStateInner {
             auth,
+            client_address: Some("127.0.0.1:1234".into()),
             api_endpoint: None,
             substituter_endpoint: None,
             host: "localhost".into(),
@@ -1040,6 +1133,158 @@ mod tests {
         assert_eq!(stored.created_by.as_deref(), Some("alice"));
         assert_eq!(stored.sigs.0.len(), 2);
         assert!(stored.sigs.0.contains(&"unregistered:preserved".to_owned()));
+        let original_nar = stored.nar_id;
+        upload.nar_hash = Hash::sha256_from_bytes(b"bad");
+        upload.sigs = vec![sign(&upload)];
+        let response = send(&upload, b"bad").await.unwrap_err().into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let stored = Object::find().one(database).await.unwrap().unwrap();
+        assert_eq!(stored.nar_id, original_nar);
+        assert_eq!(stored.sigs.0.len(), 2);
+        let events: Vec<std::collections::BTreeMap<String, opentelemetry::logs::AnyValue>> =
+            exporter
+                .get_emitted_logs()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    entry
+                        .record
+                        .attributes_iter()
+                        .map(|(key, value)| (key.as_str().to_owned(), value.clone()))
+                        .collect()
+                })
+                .collect();
+        use opentelemetry::logs::AnyValue;
+        assert_eq!(events.len(), 6);
+        assert_eq!(
+            events[0]["event"],
+            AnyValue::String("upload.accepted".into())
+        );
+        assert_eq!(
+            events[1]["event"],
+            AnyValue::String("upload.rejected".into())
+        );
+        assert_eq!(events[2]["deduplicated"], AnyValue::Boolean(true));
+        assert_eq!(
+            events[5]["event"],
+            AnyValue::String("upload.overwrite_rejected".into())
+        );
+        assert_eq!(
+            events[5]["existing.nar_hash"],
+            AnyValue::String(Hash::sha256_from_bytes(b"nar").to_typed_base16().into())
+        );
+        assert_eq!(
+            events[5]["incoming.nar_hash"],
+            AnyValue::String(Hash::sha256_from_bytes(b"bad").to_typed_base16().into())
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["token.sub"] == AnyValue::String("alice".into()))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["client.address"] == AnyValue::String("127.0.0.1:1234".into()))
+        );
+        upload.nar_hash = Hash::sha256_from_bytes(b"nar");
+        for (signature, expected) in [
+            ("alice:!".to_owned(), "malformed"),
+            (
+                NixKeypair::generate("alice").unwrap().sign(b"wrong"),
+                "invalid",
+            ),
+            (
+                NixKeypair::generate("unknown").unwrap().sign(b"nar"),
+                "unknown_key",
+            ),
+        ] {
+            upload.sigs = vec![signature];
+            assert_eq!(
+                send(&upload, b"nar")
+                    .await
+                    .unwrap_err()
+                    .into_response()
+                    .status(),
+                axum::http::StatusCode::FORBIDDEN
+            );
+            let logs = exporter.get_emitted_logs().unwrap();
+            let value = &logs
+                .last()
+                .unwrap()
+                .record
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == "signatures")
+                .unwrap()
+                .1;
+            let AnyValue::String(value) = value else {
+                panic!("signature details missing");
+            };
+            let signatures: serde_json::Value = serde_json::from_str(value.as_str()).unwrap();
+            assert_eq!(signatures[0]["status"], expected);
+        }
+        upload.sigs = vec![sign(&upload), "concurrent:first".into()];
+        let mut other: UploadPathNarInfo =
+            serde_json::from_value(serde_json::to_value(&upload).unwrap()).unwrap();
+        other.sigs.pop();
+        other.sigs.push("concurrent:second".into());
+        let (first, second) = tokio::join!(send(&upload, b"nar"), send(&other, b"nar"));
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        let merged = Object::find().one(database).await.unwrap().unwrap();
+        assert!(merged.sigs.0.contains(&"concurrent:first".into()));
+        assert!(merged.sigs.0.contains(&"concurrent:second".into()));
+        Object::delete_by_id(stored.id)
+            .exec(database)
+            .await
+            .unwrap();
+        assert!(Object::find().one(database).await.unwrap().is_none());
+        crate::gc::run_garbage_collection_once(state.config.clone())
+            .await
+            .unwrap();
+        assert!(Nar::find().all(database).await.unwrap().is_empty());
+        assert!(Chunk::find().all(database).await.unwrap().is_empty());
+        upload.sigs = vec![sign(&upload)];
+        let trailing = send(&upload, b"nar-extra")
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(trailing.status(), axum::http::StatusCode::BAD_REQUEST);
+        let mut disabled_config = state.config.clone();
+        disabled_config.upload_verification = Default::default();
+        let disabled_state = StateInner::new(disabled_config).await;
+        upload.sigs.clear();
+        upload.nar_hash = Hash::sha256_from_bytes(b"nar");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ATTIC_NAR_INFO,
+            serde_json::to_string(&upload).unwrap().parse().unwrap(),
+        );
+        assert!(
+            upload_path(
+                Extension(disabled_state),
+                Extension(request.clone()),
+                headers,
+                Body::from(&b"nar"[..])
+            )
+            .await
+            .is_ok()
+        );
+        let logs = exporter.get_emitted_logs().unwrap();
+        let attributes: std::collections::BTreeMap<_, _> = logs
+            .last()
+            .unwrap()
+            .record
+            .attributes_iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+        assert_eq!(attributes["signatures"], AnyValue::String("[]".into()));
+        assert_eq!(attributes["token.sub"], AnyValue::String("alice".into()));
+        assert_eq!(
+            attributes["event"],
+            AnyValue::String("upload.accepted".into())
+        );
+        provider.shutdown().unwrap();
     }
 
     #[tokio::test]

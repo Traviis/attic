@@ -74,8 +74,21 @@ pub enum ErrorKind {
     /// Upload rejected: {0}
     UploadRejected(String),
 
+    /// Overwrite rejected: {0}
+    UploadOverwriteRejected(Box<OverwriteRejection>),
+
     /// Error from the common components.
     AtticError(AtticError),
+}
+
+#[derive(Debug, Display)]
+/// {store_path}: existing NAR {existing_hash}, incoming NAR {incoming_hash}
+pub struct OverwriteRejection {
+    pub store_path: String,
+    pub existing_hash: String,
+    pub incoming_hash: String,
+    pub existing_uploader: Option<String>,
+    pub incoming_uploader: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -86,6 +99,10 @@ pub struct ErrorResponse {
 }
 
 impl ServerError {
+    pub(crate) fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
     pub fn database_error(error: impl StdError + Send + Sync + 'static) -> Self {
         ErrorKind::DatabaseError(AnyError::new(error)).into()
     }
@@ -187,6 +204,7 @@ impl ErrorKind {
             Self::AccessError(_) => "AccessError",
             Self::RequestError(_) => "RequestError",
             Self::UploadRejected(_) => "UploadRejected",
+            Self::UploadOverwriteRejected(_) => "UploadOverwriteRejected",
         }
     }
 
@@ -222,6 +240,7 @@ impl ErrorKind {
             Self::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
 
             Self::AccessError(_) | Self::UploadRejected(_) => StatusCode::FORBIDDEN,
+            Self::UploadOverwriteRejected(_) => StatusCode::CONFLICT,
             Self::NoSuchCache => StatusCode::NOT_FOUND,
             Self::NoSuchObject => StatusCode::NOT_FOUND,
             Self::CacheAlreadyExists => StatusCode::BAD_REQUEST,

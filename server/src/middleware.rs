@@ -40,6 +40,10 @@ pub async fn init_request_state(
 
     let req_state = Arc::new(RequestStateInner {
         auth: AuthState::new(),
+        client_address: req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|peer| peer.0.to_string()),
         api_endpoint: state.config.api_endpoint.to_owned(),
         substituter_endpoint: state.config.substituter_endpoint.to_owned(),
         host,

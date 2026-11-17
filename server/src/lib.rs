@@ -16,6 +16,7 @@
 pub mod access;
 mod access_tracking;
 mod api;
+mod audit;
 mod compression;
 pub mod config;
 pub mod database;
@@ -85,6 +86,9 @@ pub struct StateInner {
 struct RequestStateInner {
     /// Auth state.
     auth: AuthState,
+
+    /// Direct transport peer address, without trusting forwarded headers.
+    client_address: Option<String>,
 
     /// The canonical API endpoint.
     api_endpoint: Option<String>,
@@ -305,7 +309,10 @@ pub async fn run_api_server(
 
     let listener = TcpListener::bind(&listen).await?;
 
-    let server = axum::serve(listener, rest);
+    let server = axum::serve(
+        listener,
+        rest.into_make_service_with_connect_info::<SocketAddr>(),
+    );
 
     let heartbeat_handle = if state.config.database.heartbeat {
         let state_clone = state.clone();

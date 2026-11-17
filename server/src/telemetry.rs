@@ -28,6 +28,7 @@ pub enum OtlpProtocol {
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
     logger_provider: Option<SdkLoggerProvider>,
+    audit_provider: Option<SdkLoggerProvider>,
     meter_provider: Option<SdkMeterProvider>,
 }
 
@@ -39,6 +40,11 @@ impl TelemetryGuard {
             && let Err(error) = provider.shutdown()
         {
             errors.push(format!("tracer provider: {error}"));
+        }
+        if let Some(provider) = self.audit_provider
+            && let Err(error) = provider.shutdown()
+        {
+            errors.push(format!("audit provider: {error}"));
         }
         if let Some(provider) = self.logger_provider
             && let Err(error) = provider.shutdown()
@@ -81,6 +87,7 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
         return Ok(TelemetryGuard {
             tracer_provider: None,
             logger_provider: None,
+            audit_provider: None,
             meter_provider: None,
         });
     }
@@ -116,9 +123,27 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
     } else {
         None
     };
-    let log_layer = logger_provider
-        .as_ref()
-        .map(|provider| OpenTelemetryTracingBridge::new(provider).with_filter(otel_filter()));
+    let audit_provider = if signal_export_configured("LOGS") {
+        let provider = SdkLoggerProvider::builder()
+            .with_resource(resource.clone())
+            .with_log_processor(crate::audit::Processor::new(
+                crate::audit::Exporter(build_log_exporter(protocol_for("LOGS")?)?),
+                &resource,
+                2048,
+            ))
+            .build();
+        crate::audit::install(&provider);
+        Some(provider)
+    } else {
+        None
+    };
+    let log_layer = logger_provider.as_ref().map(|provider| {
+        OpenTelemetryTracingBridge::new(provider)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() != "attic.audit.fallback"
+            }))
+            .with_filter(otel_filter())
+    });
 
     let tracer_provider = if signal_export_configured("TRACES") {
         let provider = SdkTracerProvider::builder()
@@ -148,6 +173,7 @@ pub fn init(tokio_console: bool) -> Result<TelemetryGuard> {
     Ok(TelemetryGuard {
         tracer_provider,
         logger_provider,
+        audit_provider,
         meter_provider,
     })
 }
