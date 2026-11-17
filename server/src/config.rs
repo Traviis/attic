@@ -1,5 +1,7 @@
 //! Server configuration.
 
+pub mod upload_verification;
+
 use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
@@ -106,6 +108,10 @@ pub struct Config {
     #[serde(rename = "max-nar-info-size")]
     #[serde(default = "default_max_nar_info_size")]
     pub max_nar_info_size: usize,
+
+    /// Upload signature verification policy and static registry.
+    #[serde(rename = "upload-verification", default)]
+    pub upload_verification: upload_verification::UploadVerification,
 
     /// Database connection.
     pub database: DatabaseConfig,
@@ -570,12 +576,24 @@ fn load_config_from_path(path: &Path) -> Result<Config> {
     tracing::info!("Using configurations: {:?}", path);
 
     let config = std::fs::read_to_string(path)?;
-    Ok(toml::from_str(&config)?)
+    parse_config(&config)
 }
 
 fn load_config_from_str(s: &str) -> Result<Config> {
     tracing::info!("Using configurations from environment variable");
-    Ok(toml::from_str(s)?)
+    parse_config(s)
+}
+
+fn parse_config(s: &str) -> Result<Config> {
+    let config: Config = toml::from_str(s)?;
+    let policy = &config.upload_verification;
+    tracing::info!(
+        enabled = policy.enabled,
+        static_key_count = policy.trusted_keys.len(),
+        key_names = ?policy.trusted_keys.keys().collect::<Vec<_>>(),
+        "Upload signature verification configuration"
+    );
+    Ok(config)
 }
 
 /// Loads the configuration in the standard order.
@@ -595,6 +613,30 @@ pub async fn load_config(config_path: Option<&Path>, allow_oobe: bool) -> Result
         }
 
         load_config_from_path(&config_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_verification_uses_server_config_loading() {
+        let template = include_str!("config-template.toml").replace(
+            "token-rs256-secret-base64 = \"%token_rs256_secret_base64%\"",
+            "token-hs256-secret-base64 = \"dGVzdA==\"",
+        );
+        let config = parse_config(&template).unwrap();
+        assert!(!config.upload_verification.enabled);
+        let config = parse_config(&format!("{template}\n[upload-verification]\nenabled=true\n[upload-verification.caches.private]\nenabled=false")).unwrap();
+        assert!(config.upload_verification.enabled_for_cache("other"));
+        assert!(!config.upload_verification.enabled_for_cache("private"));
+        assert!(
+            parse_config(&format!(
+                "{template}\n[upload-verification]\nmin-signatures=0"
+            ))
+            .is_err()
+        );
     }
 }
 
