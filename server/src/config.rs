@@ -109,6 +109,14 @@ pub struct Config {
     #[serde(default = "default_max_nar_info_size")]
     pub max_nar_info_size: usize,
 
+    /// Refuse replacing a cache path with a different NAR hash.
+    #[serde(rename = "protect-path-overwrites", default)]
+    pub protect_path_overwrites: bool,
+
+    /// Export upload audit events; defaults to enabled with OTEL log export.
+    #[serde(rename = "upload-audit", default)]
+    pub upload_audit: Option<bool>,
+
     /// Upload signature verification policy and static registry.
     #[serde(rename = "upload-verification", default)]
     pub upload_verification: upload_verification::UploadVerification,
