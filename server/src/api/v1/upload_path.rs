@@ -165,8 +165,46 @@ pub(crate) async fn upload_path(
         .await?;
 
     let username = req_state.auth.username().map(str::to_string);
+    let decision = crate::upload_verification::verify(
+        &state.config.upload_verification,
+        &upload_info,
+        username.as_deref(),
+        Utc::now(),
+    );
+    if let Some(reason) = &decision.reason {
+        let statuses =
+            serde_json::to_string(&decision.signatures).map_err(ServerError::request_error)?;
+        tracing::warn!(
+            cache = %upload_info.cache,
+            store_path = %upload_info.store_path,
+            reason,
+            signatures = %statuses,
+            "Upload rejected"
+        );
+        let statuses = decision
+            .signatures
+            .iter()
+            .map(|signature| format!("{}={:?}", signature.key_name, signature.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ErrorKind::UploadRejected(format!(
+            "{}: {}; signatures: {}",
+            upload_info.store_path, reason, statuses
+        ))
+        .into());
+    }
 
     let nar_size = upload_info.nar_size;
+    let audit = serde_json::json!({
+        "cache": upload_info.cache.as_str(),
+        "store_path": upload_info.store_path,
+        "nar_hash": upload_info.nar_hash.to_typed_base16(),
+        "nar_size": nar_size,
+        "token.sub": username,
+        "signatures": decision.signatures,
+        "signatures.valid_count": decision.valid_count,
+        "min-signatures": state.config.upload_verification.min_signatures,
+    });
 
     // Try to acquire a lock on an existing NAR
     if let Some(existing_nar) = database.find_and_lock_nar(&upload_info.nar_hash).await? {
@@ -193,6 +231,7 @@ pub(crate) async fn upload_path(
             )
             .await;
             record_upload(&result, nar_size, "deduplicated", started_at);
+            record_decision(&result, &audit, true);
             return result;
         }
     }
@@ -207,7 +246,22 @@ pub(crate) async fn upload_path(
         })
         .unwrap_or("error");
     record_upload(&result, nar_size, kind, started_at);
+    record_decision(&result, &audit, kind == "deduplicated");
     result
+}
+
+fn record_decision(
+    result: &ServerResult<Json<UploadPathResult>>,
+    audit: &serde_json::Value,
+    deduplicated: bool,
+) {
+    let event = if result.is_ok() {
+        "upload.accepted"
+    } else {
+        "upload.rejected"
+    };
+    let reason = result.as_ref().err().map(ToString::to_string);
+    tracing::info!(target: "attic.audit", event, deduplicated, reason, details = %audit, "Upload decision");
 }
 
 fn record_upload(
@@ -253,7 +307,12 @@ async fn upload_path_dedup(
     state: &State,
     existing_nar: NarGuard,
 ) -> ServerResult<Json<UploadPathResult>> {
-    if state.config.require_proof_of_possession {
+    if state.config.require_proof_of_possession
+        || state
+            .config
+            .upload_verification
+            .enabled_for_cache(upload_info.cache.as_str())
+    {
         let (mut stream, nar_compute) = HashReader::new(stream, Sha256::new());
         tokio::io::copy(&mut stream, &mut tokio::io::sink())
             .await
@@ -275,18 +334,12 @@ async fn upload_path_dedup(
     // Finally...
 
     // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(existing_nar.id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(database)
-    .await
-    .map_err(ServerError::database_error)?;
+    let txn = database
+        .begin()
+        .await
+        .map_err(ServerError::database_error)?;
+    store_object(&txn, &cache, &upload_info, existing_nar.id, username, state).await?;
+    txn.commit().await.map_err(ServerError::database_error)?;
 
     // Ensure it's not unlocked earlier
     drop(existing_nar);
@@ -481,18 +534,7 @@ async fn upload_path_new_chunked(
     .map_err(ServerError::database_error)?;
 
     // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(nar_id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+    store_object(&txn, &cache, &upload_info, nar_id, username, state).await?;
 
     txn.commit().await.map_err(ServerError::database_error)?;
 
@@ -535,7 +577,11 @@ async fn upload_path_new_unchunked(
         compression_config.level(),
         database.clone(),
         state.clone(),
-        state.config.require_proof_of_possession,
+        state.config.require_proof_of_possession
+            || state
+                .config
+                .upload_verification
+                .enabled_for_cache(upload_info.cache.as_str()),
     )
     .await?;
     let file_size = chunk.guard.file_size.unwrap() as usize;
@@ -581,18 +627,7 @@ async fn upload_path_new_unchunked(
     .map_err(ServerError::database_error)?;
 
     // Create a mapping granting the local cache access to the NAR
-    Object::insert({
-        let mut new_object = upload_info.to_active_model();
-        new_object.cache_id = Set(cache.id);
-        new_object.nar_id = Set(nar_id);
-        new_object.created_at = Set(Utc::now());
-        new_object.created_by = Set(username);
-        new_object
-    })
-    .on_conflict_do_update()
-    .exec(&txn)
-    .await
-    .map_err(ServerError::database_error)?;
+    store_object(&txn, &cache, &upload_info, nar_id, username, state).await?;
 
     txn.commit().await.map_err(ServerError::database_error)?;
 
@@ -601,6 +636,79 @@ async fn upload_path_new_unchunked(
         file_size: Some(file_size),
         frac_deduplicated: None,
     }))
+}
+
+async fn store_object(
+    txn: &sea_orm::DatabaseTransaction,
+    cache: &cache::Model,
+    upload: &UploadPathNarInfo,
+    nar_id: i64,
+    username: Option<String>,
+    state: &State,
+) -> ServerResult<()> {
+    let mut model = upload.to_active_model();
+    model.cache_id = Set(cache.id);
+    model.nar_id = Set(nar_id);
+    model.created_at = Set(Utc::now());
+    model.created_by = Set(username);
+    if !state
+        .config
+        .upload_verification
+        .enabled_for_cache(upload.cache.as_str())
+    {
+        Object::insert(model)
+            .on_conflict_do_update()
+            .exec(txn)
+            .await
+            .map_err(ServerError::database_error)?;
+        return Ok(());
+    }
+    // Serialize signature merges within each cache, including first uploads.
+    cache::Entity::update_many()
+        .col_expr(
+            cache::Column::Priority,
+            sea_orm::sea_query::Expr::col(cache::Column::Priority),
+        )
+        .filter(cache::Column::Id.eq(cache.id))
+        .exec(txn)
+        .await
+        .map_err(ServerError::database_error)?;
+    if let Some(existing) = Object::find()
+        .filter(object::Column::CacheId.eq(cache.id))
+        .filter(object::Column::StorePathHash.eq(upload.store_path_hash.to_string()))
+        .one(txn)
+        .await
+        .map_err(ServerError::database_error)?
+    {
+        let nar = Nar::find_by_id(existing.nar_id)
+            .one(txn)
+            .await
+            .map_err(ServerError::database_error)?
+            .ok_or(ErrorKind::NoSuchObject)?;
+        if nar.nar_hash == upload.nar_hash.to_typed_base16() {
+            let mut signatures = existing.sigs.0;
+            for signature in &upload.sigs {
+                if !signatures.contains(signature) {
+                    signatures.push(signature.clone());
+                }
+            }
+            model.id = Set(existing.id);
+            model.sigs = Set(DbJson(signatures));
+            model.created_at = Set(existing.created_at);
+            model.created_by = Set(existing.created_by);
+            Object::update(model)
+                .exec(txn)
+                .await
+                .map_err(ServerError::database_error)?;
+            return Ok(());
+        }
+    }
+    Object::insert(model)
+        .on_conflict_do_update()
+        .exec(txn)
+        .await
+        .map_err(ServerError::database_error)?;
+    Ok(())
 }
 
 /// Uploads a chunk with the desired compression.
@@ -821,6 +929,118 @@ mod tests {
     use super::*;
     use async_compression::tokio::bufread::ZstdEncoder;
     use tokio::io::{AsyncReadExt, BufReader};
+
+    #[tokio::test]
+    async fn verifies_before_dedup_and_rejects_mismatched_body() {
+        use crate::access::{Token, http::AuthState};
+        use crate::database::migration::{Migrator, MigratorTrait};
+        use crate::{RequestStateInner, StateInner};
+        use attic::signing::NixKeypair;
+        use axum::response::IntoResponse;
+        use std::sync::atomic::AtomicBool;
+
+        let temp = tempfile::tempdir().unwrap();
+        let template = include_str!("../../config-template.toml")
+            .replace("%database_url%", "sqlite::memory:")
+            .replace("%storage_path%", temp.path().to_str().unwrap())
+            .replace(
+                "token-rs256-secret-base64 = \"%token_rs256_secret_base64%\"",
+                "token-hs256-secret-base64 = \"dGVzdA==\"",
+            );
+        let key = NixKeypair::generate("alice").unwrap();
+        let mut config: crate::config::Config = toml::from_str(&template).unwrap();
+        config.require_proof_of_possession = false;
+        config.chunking.nar_size_threshold = 0;
+        config.upload_verification = toml::from_str(&format!(
+            "enabled=true\ntrusted-public-keys=[{:?}]",
+            key.export_public_key()
+        ))
+        .unwrap();
+        let state = StateInner::new(config).await;
+        let database = state.database().await.unwrap();
+        Migrator::up(database, None).await.unwrap();
+        cache::Entity::insert(cache::ActiveModel {
+            name: Set("private".into()),
+            keypair: Set(key.export_keypair()),
+            is_public: Set(false),
+            store_dir: Set("/nix/store".into()),
+            priority: Set(40),
+            upstream_cache_key_names: Set(DbJson(vec![])),
+            created_at: Set(Utc::now()),
+            deleted_at: Set(None),
+            retention_period: Set(None),
+            ..Default::default()
+        })
+        .exec(database)
+        .await
+        .unwrap();
+        let mut token = Token::new("alice".into(), &(Utc::now() + chrono::Duration::hours(1)));
+        token
+            .get_or_insert_permission_mut("private".parse().unwrap())
+            .push = true;
+        let auth = AuthState::new();
+        auth.token.set(token).unwrap();
+        let request = Arc::new(RequestStateInner {
+            auth,
+            api_endpoint: None,
+            substituter_endpoint: None,
+            host: "localhost".into(),
+            client_claims_https: false,
+            public_cache: AtomicBool::new(false),
+        });
+        let mut upload = UploadPathNarInfo {
+            cache: "private".parse().unwrap(),
+            store_path_hash: attic::nix_store::StorePathHash::new(
+                "00000000000000000000000000000000".into(),
+            )
+            .unwrap(),
+            store_path: "/nix/store/00000000000000000000000000000000-example".into(),
+            references: vec![],
+            system: None,
+            deriver: None,
+            sigs: vec![],
+            ca: None,
+            nar_hash: Hash::sha256_from_bytes(b"nar"),
+            nar_size: 3,
+        };
+        let sign = |upload: &UploadPathNarInfo| {
+            key.sign(&attic::signing::fingerprint(
+                std::path::Path::new(&upload.store_path),
+                &upload.nar_hash,
+                upload.nar_size,
+                &[] as &[&str],
+            ))
+        };
+        upload.sigs.push(sign(&upload));
+        let send = |upload: &UploadPathNarInfo, body: &'static [u8]| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                ATTIC_NAR_INFO,
+                serde_json::to_string(upload).unwrap().parse().unwrap(),
+            );
+            upload_path(
+                Extension(state.clone()),
+                Extension(request.clone()),
+                headers,
+                Body::from(body),
+            )
+        };
+        assert!(send(&upload, b"nar").await.is_ok());
+        upload.sigs.clear();
+        let response = send(&upload, b"nar").await.unwrap_err().into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        upload.sigs.push(sign(&upload));
+        let response = send(&upload, b"bad").await.unwrap_err().into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        upload.sigs.push("unregistered:preserved".into());
+        assert!(send(&upload, b"nar").await.is_ok());
+        upload.sigs.pop();
+        assert!(send(&upload, b"nar").await.is_ok());
+        let stored = Object::find().one(database).await.unwrap().unwrap();
+        assert_eq!(stored.created_by.as_deref(), Some("alice"));
+        assert_eq!(stored.sigs.0.len(), 2);
+        assert!(stored.sigs.0.contains(&"unregistered:preserved".to_owned()));
+    }
 
     #[tokio::test]
     async fn decodes_zstd_upload_body() {

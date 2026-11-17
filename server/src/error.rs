@@ -71,6 +71,8 @@ pub enum ErrorKind {
 
     /// General request error: {0:#}
     RequestError(AnyError),
+    /// Upload rejected: {0}
+    UploadRejected(String),
 
     /// Error from the common components.
     AtticError(AtticError),
@@ -184,6 +186,7 @@ impl ErrorKind {
             Self::ManifestSerializationError(_) => "ManifestSerializationError",
             Self::AccessError(_) => "AccessError",
             Self::RequestError(_) => "RequestError",
+            Self::UploadRejected(_) => "UploadRejected",
         }
     }
 
@@ -218,7 +221,7 @@ impl ErrorKind {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
 
-            Self::AccessError(_) => StatusCode::FORBIDDEN,
+            Self::AccessError(_) | Self::UploadRejected(_) => StatusCode::FORBIDDEN,
             Self::NoSuchCache => StatusCode::NOT_FOUND,
             Self::NoSuchObject => StatusCode::NOT_FOUND,
             Self::CacheAlreadyExists => StatusCode::BAD_REQUEST,

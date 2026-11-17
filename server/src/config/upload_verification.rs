@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use attic::signing::NixPublicKey;
 use chrono::{DateTime, FixedOffset};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Scalar metadata attached to a registered key.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MetadataValue {
     String(String),

@@ -28,6 +28,7 @@ pub mod nix_manifest;
 pub mod oobe;
 mod storage;
 pub mod telemetry;
+mod upload_verification;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
