@@ -62,7 +62,8 @@ fn nix_store_signature_verifies() {
     use std::process::{Command, Stdio};
 
     let temp = tempfile::tempdir().unwrap();
-    let store = format!("local?root={}", temp.path().join("store").display());
+    let root = temp.path().canonicalize().unwrap();
+    let store = format!("local?root={}", root.join("store").display());
     let run = |args: &[&str], input: Option<&[u8]>| {
         let mut command = Command::new("nix");
         command.args([
