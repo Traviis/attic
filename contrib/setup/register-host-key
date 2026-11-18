@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Register a reusable daemon host key; host changes require operator execution."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.request
+
+
+def run(arguments, input=None):
+    result = subprocess.run(arguments, input=input, capture_output=True, check=True)
+    if result.stderr:
+        print(result.stderr.decode().rstrip(), file=sys.stderr)
+    return result.stdout
+
+
+def register(args):
+    for value in (args.identity, args.host):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+            raise ValueError("invalid identity or host")
+    if args.generation < 1:
+        raise ValueError("generation must be positive")
+    root = args.root.resolve()
+    if root == Path("/") and os.geteuid() != 0:
+        raise ValueError("host installation requires root")
+    store = getattr(args, "store", None)
+    if root != Path("/") and (
+        store is None
+        or not store.is_absolute()
+        or store.resolve() == Path("/nix/store")
+    ):
+        raise ValueError(
+            "disposable installation requires an explicit isolated --store path"
+        )
+    nix = ["nix", "--extra-experimental-features", "nix-command"]
+    if store is not None:
+        nix += ["--store", str(store)]
+    directory = root / "etc/nix"
+    name = f"{args.identity}-{args.host}-{args.generation}"
+    key = directory / (name + ".key")
+    config = directory / "nix.conf"
+    marker = directory / (name + ".signed")
+    for path in (root / "etc", directory, key, config, marker):
+        if path.is_symlink():
+            raise ValueError("installation paths must not be symlinks")
+    for path in (key, config, marker):
+        if path.exists() and not path.is_file():
+            raise ValueError("installation files must be regular files")
+    directory.mkdir(parents=True, exist_ok=True)
+    if not key.exists():
+        secret = run(nix + ["key", "generate-secret", "--key-name", name])
+        descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(secret)
+    if key.is_symlink() or not key.is_file():
+        raise ValueError("key must be a regular file")
+    os.chmod(key, 0o400)
+    if root == Path("/"):
+        os.chown(key, 0, 0)
+    public = (
+        run(nix + ["key", "convert-secret-to-public"], key.read_bytes())
+        .decode()
+        .strip()
+    )
+    if public.split(":", 1)[0] != name:
+        raise ValueError("existing key name differs from requested identity")
+    line = "extra-secret-key-files = " + str(key)
+    content = config.read_text() if config.exists() else ""
+    if line not in content.splitlines():
+        with config.open("a") as file:
+            file.write(
+                ("\n" if content and not content.endswith("\n") else "") + line + "\n"
+            )
+    if not marker.exists():
+        run(nix + ["store", "sign", "--key-file", str(key), "--all"])
+        marker.touch(mode=0o600)
+    address = os.environ["VAULT_ADDR"].rstrip("/")
+    headers = {
+        "X-Vault-Token": os.environ["VAULT_TOKEN"],
+        "Content-Type": "application/json",
+    }
+    if os.environ.get("VAULT_NAMESPACE"):
+        headers["X-Vault-Namespace"] = os.environ["VAULT_NAMESPACE"]
+    request = urllib.request.Request(
+        address + f"/v1/secret/data/nix-keys/{args.identity}/hosts/{args.host}",
+        data=json.dumps({"data": {"publicKey": public}}).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        response.read()
+    print("Host key registered; restart nix-daemon to load daemon configuration")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("identity")
+    parser.add_argument("host")
+    parser.add_argument("--generation", type=int, default=1)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path("/"),
+        help="installation root; use disposable path for qualification",
+    )
+    parser.add_argument(
+        "--store",
+        type=Path,
+        help="explicit isolated local store path; required with --root",
+    )
+    try:
+        register(parser.parse_args())
+    except (KeyError, OSError, ValueError, subprocess.SubprocessError):
+        print(
+            "Host registration failed; key files are retained for retry",
+            file=sys.stderr,
+        )
+        sys.exit(1)
