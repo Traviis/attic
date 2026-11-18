@@ -232,7 +232,7 @@ async fn get_nar(
             Download::Url(url) => Ok(Redirect::temporary(&url).into_response()),
             Download::AsyncRead(stream) => {
                 let stream = ReaderStream::new(stream).map_err(|e| {
-                    tracing::error!(%e, "Stream error");
+                    tracing::error!(error = ?e, "Stream error");
                     e
                 });
                 let body = Body::from_stream(stream);
@@ -257,11 +257,27 @@ async fn get_nar(
             match storage
                 .download_file_db(&chunk.remote_file.0, true)
                 .await
-                .map_err(io_error)?
-            {
+                .map_err(|e| {
+                    tracing::error!(
+                        chunk_id = chunk.id,
+                        remote_file_id = %chunk.remote_file_id,
+                        error = ?e,
+                        "Chunk download failed"
+                    );
+                    io_error(e)
+                })? {
                 Download::Url(_) => Err(IoError::other("URLs not supported for NAR reassembly")),
                 Download::AsyncRead(stream) => {
-                    let stream: BoxStream<_> = Box::pin(ReaderStream::new(stream));
+                    let stream: BoxStream<_> =
+                        Box::pin(ReaderStream::new(stream).map_err(move |e| {
+                            tracing::error!(
+                                chunk_id = chunk.id,
+                                remote_file_id = %chunk.remote_file_id,
+                                error = ?e,
+                                "Chunk stream failed"
+                            );
+                            e
+                        }));
                     Ok(stream)
                 }
             }
@@ -273,7 +289,7 @@ async fn get_nar(
         // TODO: Make num_prefetch configurable
         // The ideal size depends on the average chunk size
         let merged = merge_chunks(chunks, streamer, storage, 2).map_err(|e| {
-            tracing::error!(%e, "Stream error");
+            tracing::error!(error = ?e, "Stream error");
             e
         });
         let body = Body::from_stream(merged);
