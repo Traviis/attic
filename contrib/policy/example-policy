@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Site policy example; core Attic does not interpret kind metadata."""
+
+import json
+import sys
+
+
+def decide(request):
+    if request.get("version") != 1:
+        return {"allow": False, "reason": "unsupported policy version"}
+    subject = request.get("token", {}).get("sub")
+    if not isinstance(subject, str) or not subject:
+        return {"allow": False, "reason": "missing token subject"}
+    valid = [
+        signature.get("metadata") or {}
+        for signature in request.get("signatures", [])
+        if signature.get("status") == "valid"
+    ]
+    if subject.startswith("svc/"):
+        allowed = any(
+            metadata.get("kind") == "service" and metadata.get("identity") == subject
+            for metadata in valid
+        )
+        reason = "service requires matching service signature"
+    else:
+        vault = any(
+            metadata.get("kind") == "vault" and metadata.get("identity") == subject
+            for metadata in valid
+        )
+        host = any(metadata.get("kind") == "host" for metadata in valid)
+        allowed = vault and host
+        reason = "person requires matching Vault signature and host signature"
+    return {"allow": allowed, "reason": "" if allowed else reason}
+
+
+if __name__ == "__main__":
+    try:
+        result = decide(json.load(sys.stdin))
+    except (ValueError, TypeError, AttributeError):
+        result = {"allow": False, "reason": "invalid policy request"}
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")

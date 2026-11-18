@@ -45,6 +45,42 @@ pub struct Push {
     /// Always send the upload info as part of the payload.
     #[clap(long, hide = true)]
     force_preamble: bool,
+
+    /// Sign upload metadata with this Nix secret key file.
+    #[clap(long, conflicts_with = "no_sign")]
+    signing_key_file: Option<PathBuf>,
+
+    /// Disable upload signing for this push.
+    #[clap(long)]
+    no_sign: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_flags_parse_and_conflict() {
+        let push =
+            Push::try_parse_from(["push", "cache", "--signing-key-file", "/run/key"]).unwrap();
+        assert_eq!(push.signing_key_file, Some(PathBuf::from("/run/key")));
+        assert!(!push.no_sign);
+        assert!(
+            Push::try_parse_from(["push", "cache", "--no-sign"])
+                .unwrap()
+                .no_sign
+        );
+        assert!(
+            Push::try_parse_from([
+                "push",
+                "cache",
+                "--no-sign",
+                "--signing-key-file",
+                "/run/key"
+            ])
+            .is_err()
+        );
+    }
 }
 
 struct PushContext {
@@ -142,6 +178,14 @@ pub async fn run(opts: Opts) -> Result<()> {
     }
 
     let config = Config::load()?;
+    let mut signing = config.signing.clone();
+    if sub.no_sign {
+        signing = Default::default();
+    }
+    if let Some(path) = &sub.signing_key_file {
+        signing.key_file = Some(path.clone());
+    }
+    let signer = crate::signing::Signer::load(&signing)?;
 
     let store = Arc::new(NixStore::connect()?);
 
@@ -177,6 +221,7 @@ pub async fn run(opts: Opts) -> Result<()> {
         cache_config,
         mp,
         push_config,
+        signer,
     );
 
     let push_ctx = PushContext {

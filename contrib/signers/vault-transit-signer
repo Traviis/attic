@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Sign one Attic protocol batch using one Vault transit batch_input request."""
+
+import base64
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+
+def sign(request, identity):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", identity):
+        raise ValueError("invalid signing identity")
+    if request.get("version") != 1:
+        raise ValueError("unsupported signing version")
+    paths = request["paths"]
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("paths must be a nonempty list")
+    payload = {
+        "batch_input": [
+            {"input": base64.b64encode(path["fingerprint"].encode()).decode()}
+            for path in paths
+        ]
+    }
+    address = os.environ["VAULT_ADDR"].rstrip("/")
+    headers = {
+        "X-Vault-Token": os.environ["VAULT_TOKEN"],
+        "Content-Type": "application/json",
+    }
+    if os.environ.get("VAULT_NAMESPACE"):
+        headers["X-Vault-Namespace"] = os.environ["VAULT_NAMESPACE"]
+    command = urllib.request.Request(
+        address + "/v1/transit/sign/nix-" + identity,
+        data=json.dumps(payload).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(command, timeout=50) as response:
+        results = json.load(response)["data"]["batch_results"]
+    if len(results) != len(paths):
+        raise ValueError("Vault response length mismatch")
+    signatures = []
+    for result in results:
+        match = re.fullmatch(
+            r"vault:v([1-9][0-9]*):([A-Za-z0-9+/]+=*)", result.get("signature", "")
+        )
+        if not match or len(base64.b64decode(match[2], validate=True)) != 64:
+            raise ValueError("Vault returned an invalid signature")
+        signatures.append(f"{identity}-vault-{match[1]}:{match[2]}")
+    return {"signatures": signatures}
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 2:
+            raise ValueError("usage: vault-transit-signer IDENTITY")
+        json.dump(sign(json.load(sys.stdin), sys.argv[1]), sys.stdout)
+        sys.stdout.write("\n")
+    except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
+        print(
+            "Vault signing failed; check service availability and signing permissions",
+            file=sys.stderr,
+        )
+        sys.exit(1)

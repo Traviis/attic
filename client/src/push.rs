@@ -92,6 +92,7 @@ pub struct Pusher {
     cache_config: CacheConfig,
     workers: Vec<JoinHandle<HashMap<StorePath, Result<()>>>>,
     sender: JobSender,
+    signer: crate::signing::Signer,
 }
 
 /// A wrapper over a `Pusher` that accepts a stream of `StorePath`s.
@@ -167,6 +168,7 @@ impl Pusher {
         cache_config: CacheConfig,
         mp: MultiProgress,
         config: PushConfig,
+        signer: crate::signing::Signer,
     ) -> Self {
         let (sender, receiver) = channel::unbounded();
         let mut workers = Vec::new();
@@ -189,6 +191,7 @@ impl Pusher {
             cache_config,
             workers,
             sender,
+            signer,
         }
     }
 
@@ -220,7 +223,7 @@ impl Pusher {
         no_closure: bool,
         ignore_upstream_filter: bool,
     ) -> Result<PushPlan> {
-        PushPlan::plan(
+        let mut plan = PushPlan::plan(
             self.store.clone(),
             &self.api,
             &self.cache,
@@ -229,7 +232,43 @@ impl Pusher {
             no_closure,
             ignore_upstream_filter,
         )
-        .await
+        .await?;
+        let mut uploads = Vec::with_capacity(plan.store_path_map.len());
+        for info in plan.store_path_map.values() {
+            let full_path = self.store.get_full_path(&info.path);
+            let upload = UploadPathNarInfo {
+                cache: self.cache.clone(),
+                store_path_hash: info.path.to_hash(),
+                store_path: full_path
+                    .to_str()
+                    .ok_or_else(|| anyhow!("Path contains non-UTF-8"))?
+                    .into(),
+                references: info
+                    .references
+                    .iter()
+                    .map(|reference| {
+                        reference
+                            .to_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| anyhow!("Reference contains non-UTF-8"))
+                    })
+                    .collect::<Result<_>>()?,
+                system: None,
+                deriver: None,
+                sigs: info.sigs.clone(),
+                ca: info.ca.clone(),
+                nar_hash: info.nar_hash.clone(),
+                nar_size: info.nar_size as usize,
+            };
+            uploads.push(upload);
+        }
+        self.signer.sign(&mut uploads).await?;
+        for upload in uploads {
+            if let Some(info) = plan.store_path_map.get_mut(&upload.store_path_hash) {
+                info.sigs = upload.sigs;
+            }
+        }
+        Ok(plan)
     }
 
     /// Converts the pusher into a `PushSession`.

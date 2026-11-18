@@ -157,6 +157,26 @@ mod tests {
 
     #[test]
     fn exports_route_and_upload_outcomes_and_balances_cancelled_handlers() {
+        const CHILD: &str = "ATTIC_METRICS_TEST_PROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "metrics::tests::exports_route_and_upload_outcomes_and_balances_cancelled_handlers", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "metrics subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "unexpected metrics diagnostics: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
         use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
 

@@ -7,6 +7,7 @@
   - [Deploying to NixOS](./admin-guide/deployment/nixos.md)
   - [OpenTelemetry](./admin-guide/opentelemetry.md)
   - [Chunking](./admin-guide/chunking.md)
+  - [Upload verification](./admin-guide/upload-verification.md)
 - [FAQs](./faqs.md)
 - [Reference](./reference/README.md)
   - [attic](./reference/attic-cli.md)

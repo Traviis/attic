@@ -16,6 +16,7 @@
 pub mod access;
 mod access_tracking;
 mod api;
+mod audit;
 mod compression;
 pub mod config;
 pub mod database;
@@ -26,8 +27,11 @@ mod middleware;
 mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
+mod policy;
+mod registry;
 mod storage;
 pub mod telemetry;
+mod upload_verification;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,6 +73,8 @@ pub struct StateInner {
     /// The Attic Server configuration.
     config: Config,
 
+    registry: tokio::sync::Mutex<registry::Registry>,
+
     /// Handle to the database.
     database: OnceCell<DatabaseConnection>,
 
@@ -84,6 +90,9 @@ pub struct StateInner {
 struct RequestStateInner {
     /// Auth state.
     auth: AuthState,
+
+    /// Direct transport peer address, without trusting forwarded headers.
+    client_address: Option<String>,
 
     /// The canonical API endpoint.
     api_endpoint: Option<String>,
@@ -106,12 +115,29 @@ struct RequestStateInner {
 
 impl StateInner {
     async fn new(config: Config) -> State {
-        Arc::new(Self {
+        let mut registry = registry::Registry::new(config.upload_verification.clone());
+        registry.refresh().await;
+        let resolver_enabled = config.upload_verification.resolver.is_some();
+        let state = Arc::new(Self {
+            registry: tokio::sync::Mutex::new(registry),
             config,
             database: OnceCell::new(),
             storage: OnceCell::new(),
             access_tracker: OnceCell::new(),
-        })
+        });
+        if resolver_enabled {
+            let weak = Arc::downgrade(&state);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let Some(state) = weak.upgrade() else {
+                        break;
+                    };
+                    state.registry.lock().await.refresh_if_due().await;
+                }
+            });
+        }
+        state
     }
 
     /// Returns a handle to the database.
@@ -304,7 +330,10 @@ pub async fn run_api_server(
 
     let listener = TcpListener::bind(&listen).await?;
 
-    let server = axum::serve(listener, rest);
+    let server = axum::serve(
+        listener,
+        rest.into_make_service_with_connect_info::<SocketAddr>(),
+    );
 
     let heartbeat_handle = if state.config.database.heartbeat {
         let state_clone = state.clone();
