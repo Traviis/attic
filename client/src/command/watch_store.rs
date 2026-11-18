@@ -86,6 +86,7 @@ pub async fn run(opts: Opts) -> Result<()> {
         cache_config,
         mp,
         push_config,
+        crate::signing::Signer::load(&config.signing)?,
     )
     .into_push_session(push_session_config);
 
