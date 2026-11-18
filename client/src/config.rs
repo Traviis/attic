@@ -46,6 +46,9 @@ pub struct ConfigData {
     #[serde(default = "HashMap::new")]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub servers: HashMap<ServerName, ServerConfig>,
+
+    #[serde(default)]
+    pub signing: crate::signing::Signing,
 }
 
 /// Configuration of a server.

@@ -21,6 +21,7 @@ mod config;
 mod nix_config;
 mod nix_netrc;
 mod push;
+mod signing;
 mod version;
 
 use anyhow::Result;
