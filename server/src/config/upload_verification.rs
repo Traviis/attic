@@ -43,11 +43,36 @@ pub struct TrustedKey {
 /// Parsed key and attribution data.
 #[derive(Clone, Debug)]
 pub struct RegisteredKey {
+    pub source: &'static str,
+    pub detailed: bool,
     pub public_key: NixPublicKey,
     pub valid_from: Option<DateTime<FixedOffset>>,
     pub valid_until: Option<DateTime<FixedOffset>>,
     pub revoked: bool,
     pub metadata: BTreeMap<String, MetadataValue>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Resolver {
+    pub command: Option<Vec<String>>,
+    pub file: Option<std::path::PathBuf>,
+    #[serde(default = "refresh_interval", with = "humantime_serde")]
+    pub refresh_interval: std::time::Duration,
+    #[serde(default = "command_timeout", with = "humantime_serde")]
+    pub command_timeout: std::time::Duration,
+    #[serde(default = "refresh_limit")]
+    pub unknown_key_refresh_limit: String,
+}
+
+fn refresh_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(300)
+}
+fn command_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(10)
+}
+fn refresh_limit() -> String {
+    "6/min".into()
 }
 
 /// Cache-local override of the server verification switch.
@@ -67,6 +92,7 @@ pub struct UploadVerification {
     pub min_signatures: usize,
     pub caches: BTreeMap<String, CacheVerification>,
     pub trusted_keys: BTreeMap<String, RegisteredKey>,
+    pub resolver: Option<Resolver>,
 }
 
 #[derive(Default, Deserialize)]
@@ -79,6 +105,7 @@ struct Settings {
     trusted_public_keys: Vec<String>,
     trusted_keys: Vec<TrustedKey>,
     caches: BTreeMap<String, CacheVerification>,
+    resolver: Option<Resolver>,
 }
 
 impl Default for UploadVerification {
@@ -103,6 +130,26 @@ impl TryFrom<Settings> for UploadVerification {
         if min_signatures == 0 {
             bail!("upload-verification.min-signatures must be at least 1");
         }
+        if let Some(resolver) = &settings.resolver {
+            if resolver.refresh_interval.is_zero() || resolver.command_timeout.is_zero() {
+                bail!("resolver refresh interval and command timeout must be positive");
+            }
+            if resolver
+                .command
+                .as_ref()
+                .is_some_and(|command| command.is_empty() || command[0].is_empty())
+            {
+                bail!("resolver command cannot be empty");
+            }
+            if resolver
+                .unknown_key_refresh_limit
+                .strip_suffix("/min")
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_none()
+            {
+                bail!("unknown-key-refresh-limit must use N/min");
+            }
+        }
         let mut keys = BTreeMap::new();
         for public_key in settings.trusted_public_keys {
             insert_key(
@@ -123,6 +170,7 @@ impl TryFrom<Settings> for UploadVerification {
                 bail!("duplicate detailed trusted key: {name}");
             }
             insert_key(&mut keys, key)?;
+            keys.get_mut(&name).expect("inserted key").detailed = true;
         }
         Ok(Self {
             enabled: settings.enabled,
@@ -133,6 +181,7 @@ impl TryFrom<Settings> for UploadVerification {
             min_signatures,
             caches: settings.caches,
             trusted_keys: keys,
+            resolver: settings.resolver,
         })
     }
 }
@@ -143,7 +192,10 @@ fn key_name(key: &str) -> Result<String> {
     Ok(key.split_once(':').expect("validated key").0.to_owned())
 }
 
-fn insert_key(keys: &mut BTreeMap<String, RegisteredKey>, key: TrustedKey) -> Result<()> {
+pub(crate) fn insert_key(
+    keys: &mut BTreeMap<String, RegisteredKey>,
+    key: TrustedKey,
+) -> Result<()> {
     let name = key_name(&key.public_key)?;
     let public_key: NixPublicKey = key.public_key.parse().expect("validated key");
     if let Some(existing) = keys.get(&name)
@@ -166,6 +218,8 @@ fn insert_key(keys: &mut BTreeMap<String, RegisteredKey>, key: TrustedKey) -> Re
     keys.insert(
         name,
         RegisteredKey {
+            source: "static",
+            detailed: false,
             public_key,
             valid_from,
             valid_until,

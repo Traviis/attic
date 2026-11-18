@@ -202,12 +202,14 @@ async fn upload_path_inner(
         .await?;
 
     let username = req_state.auth.username().map(str::to_string);
-    let decision = crate::upload_verification::verify(
-        &state.config.upload_verification,
-        &upload_info,
-        username.as_deref(),
-        Utc::now(),
-    );
+    let policy = state
+        .registry
+        .lock()
+        .await
+        .for_signatures(&upload_info.sigs)
+        .await;
+    let decision =
+        crate::upload_verification::verify(&policy, &upload_info, username.as_deref(), Utc::now());
     let nar_size = upload_info.nar_size;
     if let Some(audit) = audit {
         audit["signatures"] = serde_json::to_value(&decision.signatures).unwrap_or_default();
@@ -1155,6 +1157,10 @@ mod tests {
                 })
                 .collect();
         use opentelemetry::logs::AnyValue;
+        let events: Vec<_> = events
+            .into_iter()
+            .filter(|event| event.contains_key("store_path"))
+            .collect();
         assert_eq!(events.len(), 6);
         assert_eq!(
             events[0]["event"],

@@ -49,6 +49,41 @@ signatures when verification or overwrite protection is enabled.
 Startup logs report the server-wide switch, static key count, and names, without
 key material.
 
+## Dynamic trusted keys
+
+Static keys can be combined with file and direct-command sources:
+
+```toml
+[upload-verification.resolver]
+file = "/etc/attic/trusted-keys.json"
+command = ["/usr/local/bin/attic-key-resolver"]
+refresh-interval = "5m"
+command-timeout = "10s"
+unknown-key-refresh-limit = "6/min"
+```
+
+Each source returns a versioned JSON document:
+
+```json
+{"version":1,"keys":[{"publicKey":"alice-1:BASE64_PUBLIC_KEY","validUntil":"2027-11-01T00:00:00Z","revoked":false,"metadata":{"identity":"alice","kind":"host"}}]}
+```
+
+`publicKey` is required; `validFrom`, `validUntil`, `revoked`, and flat `metadata`
+are optional. Names come from public keys. Invalid entries are skipped; malformed
+JSON, unsupported versions, failed commands, and empty replacements of nonempty
+sources retain the last-known-good snapshot. A successful nonempty replacement
+removes absent keys. Conflicting names are excluded, not resolved by source order.
+A simple static entry can combine with one matching detailed entry.
+
+Sources load at startup and refresh periodically. File modification time and size
+are checked once per second and before uploads. Unknown signature names trigger
+an immediate refresh within the configured per-minute limit (`0/min` disables
+this trigger). Commands receive no shell and no stdin; stdout is limited to 1 MiB.
+Stderr is drained with at most 64 KiB retained for operational logging. Resolver
+programs must not write credentials or secret key material to stderr. Failed
+refreshes emit `registry.refresh_failed`; public-key conflicts emit
+`registry.conflict`. Upload audit signatures identify their registry source.
+
 ## Audit and overwrite protection
 
 Top-level server settings:
