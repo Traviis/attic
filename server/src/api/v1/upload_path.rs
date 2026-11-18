@@ -247,6 +247,15 @@ async fn upload_path_inner(
             if let Some(audit) = audit {
                 audit["deduplicated"] = true.into();
             }
+            check_policy_hook(
+                &policy,
+                &upload_info,
+                username.as_deref(),
+                &decision,
+                true,
+                audit,
+            )
+            .await?;
             let result = upload_path_dedup(
                 username,
                 cache,
@@ -262,6 +271,15 @@ async fn upload_path_inner(
         }
     }
 
+    check_policy_hook(
+        &policy,
+        &upload_info,
+        username.as_deref(),
+        &decision,
+        false,
+        audit,
+    )
+    .await?;
     let result = upload_path_new(username, cache, upload_info, stream, database, &state).await;
     let kind = result
         .as_ref()
@@ -273,6 +291,46 @@ async fn upload_path_inner(
         .unwrap_or("error");
     record_upload(&result, nar_size, kind, started_at);
     result
+}
+
+async fn check_policy_hook(
+    policy: &crate::config::upload_verification::UploadVerification,
+    upload: &UploadPathNarInfo,
+    subject: Option<&str>,
+    decision: &crate::upload_verification::Decision,
+    deduplicated: bool,
+    audit: &mut Option<serde_json::Value>,
+) -> ServerResult<()> {
+    let hook = policy.hook_for_cache(upload.cache.as_str());
+    let Some(hook) = hook else {
+        return Ok(());
+    };
+    let signatures: Vec<_> = decision.signatures.iter().map(|signature| serde_json::json!({
+        "keyName": signature.key_name, "status": signature.status, "source": signature.source, "metadata": signature.metadata
+    })).collect();
+    let input = serde_json::json!({"version":1,"upload":{
+        "cache":upload.cache.as_str(),"storePath":upload.store_path,"narHash":upload.nar_hash.to_typed_base16(),
+        "narSize":upload.nar_size,"references":upload.references,"deduplicated":deduplicated
+    },"token":{"sub":subject},"signatures":signatures});
+    let result = crate::policy::evaluate(hook, &input).await;
+    if let Some(audit) = audit {
+        audit["policy_hook.decision"] = if result.allow { "allow" } else { "deny" }.into();
+        audit["policy_hook.reason"] = result.reason.clone().into();
+    }
+    if !result.allow {
+        let statuses = decision
+            .signatures
+            .iter()
+            .map(|signature| format!("{}={:?}", signature.key_name, signature.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ErrorKind::UploadRejected(format!(
+            "denied by policy hook: {}; signatures: {}",
+            result.reason, statuses
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn record_decision(
@@ -1044,11 +1102,38 @@ mod tests {
             .build();
         crate::audit::install(&provider);
         config.chunking.nar_size_threshold = 0;
+        let registry_path = temp.path().join("trusted-keys.json");
+        tokio::fs::write(&registry_path, serde_json::to_vec(&serde_json::json!({"version":1,"keys":[{"publicKey":key.export_public_key(),"metadata":{"identity":"alice"}}]})).unwrap()).await.unwrap();
         config.upload_verification = toml::from_str(&format!(
-            "enabled=true\ntrusted-public-keys=[{:?}]",
-            key.export_public_key()
+            "enabled=true\n[resolver]\nfile={:?}",
+            registry_path.to_str().unwrap()
         ))
         .unwrap();
+        let hook_inputs = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let hook_allow = Arc::new(AtomicBool::new(true));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook_url = format!("http://{}/policy", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/policy",
+            axum::routing::post({
+                let inputs = hook_inputs.clone();
+                let allow = hook_allow.clone();
+                move |Json(input): Json<serde_json::Value>| {
+                    inputs.lock().unwrap().push(input);
+                    let allow = allow.load(std::sync::atomic::Ordering::Relaxed);
+                    async move { Json(serde_json::json!({"allow":allow,"reason":"site decision"})) }
+                }
+            }),
+        );
+        let hook_server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        config.upload_verification.policy_hook =
+            Some(crate::config::upload_verification::PolicyHook {
+                command: None,
+                url: Some(hook_url),
+                timeout: std::time::Duration::from_secs(2),
+            });
         assert_eq!(config.database.url, database_url);
         let state = StateInner::new(config).await;
         let database = state.database().await.unwrap();
@@ -1124,6 +1209,7 @@ mod tests {
         upload.sigs.clear();
         let response = send(&upload, b"nar").await.unwrap_err().into_response();
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(hook_inputs.lock().unwrap().len(), 1);
         upload.sigs.push(sign(&upload));
         let response = send(&upload, b"bad").await.unwrap_err().into_response();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -1162,6 +1248,51 @@ mod tests {
             .filter(|event| event.contains_key("store_path"))
             .collect();
         assert_eq!(events.len(), 6);
+        assert_eq!(
+            events[0]["policy_hook.decision"],
+            AnyValue::String("allow".into())
+        );
+        {
+            let inputs = hook_inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 5);
+            assert_eq!(inputs[0]["upload"]["deduplicated"], false);
+            assert_eq!(inputs[1]["upload"]["deduplicated"], true);
+            assert_eq!(inputs[0]["token"]["sub"], "alice");
+            assert_eq!(inputs[0]["signatures"][0]["keyName"], "alice");
+            assert_eq!(inputs[0]["signatures"][0]["status"], "valid");
+            assert_eq!(inputs[0]["signatures"][0]["source"], "file");
+            assert_eq!(inputs[0]["signatures"][0]["metadata"]["identity"], "alice");
+        }
+        hook_allow.store(false, std::sync::atomic::Ordering::Relaxed);
+        let denied = send(&upload, b"bad").await.unwrap_err();
+        assert!(
+            denied
+                .to_string()
+                .contains("denied by policy hook: site decision")
+        );
+        assert_eq!(
+            denied.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        {
+            let logs = exporter.get_emitted_logs().unwrap();
+            let attributes: std::collections::BTreeMap<_, _> = logs
+                .last()
+                .unwrap()
+                .record
+                .attributes_iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect();
+            assert_eq!(
+                attributes["policy_hook.decision"],
+                AnyValue::String("deny".into())
+            );
+            assert_eq!(
+                attributes["policy_hook.reason"],
+                AnyValue::String("site decision".into())
+            );
+        }
+        hook_allow.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             events[0]["event"],
             AnyValue::String("upload.accepted".into())
@@ -1229,6 +1360,21 @@ mod tests {
             let signatures: serde_json::Value = serde_json::from_str(value.as_str()).unwrap();
             assert_eq!(signatures[0]["status"], expected);
         }
+        upload.sigs = vec![sign(&upload)];
+        tokio::fs::write(&registry_path, serde_json::to_vec(&serde_json::json!({"version":1,"keys":[{"publicKey":key.export_public_key(),"revoked":true}]})).unwrap()).await.unwrap();
+        let hook_count = hook_inputs.lock().unwrap().len();
+        let revoked = send(&upload, b"nar").await.unwrap_err();
+        assert!(revoked.to_string().contains("Revoked"));
+        assert_eq!(hook_inputs.lock().unwrap().len(), hook_count);
+        tokio::fs::write(
+            &registry_path,
+            serde_json::to_vec(
+                &serde_json::json!({"version":1,"keys":[{"publicKey":key.export_public_key()}]}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         upload.sigs = vec![sign(&upload), "concurrent:first".into()];
         let mut other: UploadPathNarInfo =
             serde_json::from_value(serde_json::to_value(&upload).unwrap()).unwrap();
@@ -1290,6 +1436,7 @@ mod tests {
             attributes["event"],
             AnyValue::String("upload.accepted".into())
         );
+        hook_server.abort();
         provider.shutdown().unwrap();
     }
 

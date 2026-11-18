@@ -83,6 +83,43 @@ Stderr is drained with at most 64 KiB retained for operational logging. Resolver
 programs must not write credentials or secret key material to stderr. Failed
 refreshes emit `registry.refresh_failed`; public-key conflicts emit
 `registry.conflict`. Upload audit signatures identify their registry source.
+Refreshes serialize with upload registry lookups; a slow resolver can delay uploads
+up to its command timeout. Pull requests do not consult this registry.
+
+## Deny-only policy hook
+
+An optional hook runs once per path after built-in verification passes and before
+storage or deduplication accepts the upload. It cannot override a built-in
+rejection. Configuring a hook is explicit opt-in, independently of `enabled`.
+
+```toml
+[upload-verification.policy-hook]
+command = ["/usr/local/bin/site-upload-policy"]
+# Alternatively: url = "http://127.0.0.1:9000/check"
+timeout = "2s"
+
+[upload-verification.caches.private]
+enabled = true
+[upload-verification.caches.private.policy-hook]
+url = "http://127.0.0.1:9000/private"
+```
+
+Each hook must specify exactly one command argv or HTTP(S) URL. A cache-specific
+hook replaces the server-wide hook. Commands receive JSON on stdin without a
+shell. HTTP uses POST with the same JSON and does not follow redirects:
+
+```json
+{"version":1,"upload":{"cache":"private","storePath":"/nix/store/...","narHash":"sha256:HEX","narSize":123,"references":[],"deduplicated":false},"token":{"sub":"alice"},"signatures":[{"keyName":"alice-1","status":"valid","source":"file","metadata":{"identity":"alice"}}]}
+```
+
+Only registered keys have source and metadata; unregistered values are null.
+Return `{"allow":true}` or `{"allow":false,"reason":"site requirement"}`.
+Timeout, process failure, non-2xx HTTP, invalid JSON, missing `allow`, and responses
+larger than 64 KiB all deny. Denials return 403 with `denied by policy hook`, the
+reason, and signature status by key name. Audit includes `policy_hook.decision`
+and `policy_hook.reason`. Command stderr is discarded. A command creates one
+process per path; prefer HTTP for high-volume caches. Hook responses must not
+contain credentials or secrets because reasons reach clients and audit logs.
 
 ## Audit and overwrite protection
 
