@@ -37,7 +37,6 @@
 //! 1;{storePath};{narHash};{narSize};{commaDelimitedReferences}
 //! ```
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::string::ToString;
@@ -194,37 +193,8 @@ impl NarInfo {
     /// Returns the fingerprint of the object.
     pub fn fingerprint(&self) -> Vec<u8> {
         let store_dir = self.store_dir();
-        let mut fingerprint = b"1;".to_vec();
-
-        // 1;{storePath};{narHash};{narSize};{commaDelimitedReferences}
-
-        // storePath
-        fingerprint.extend(self.store_path.as_os_str().as_bytes());
-        fingerprint.extend(b";");
-
-        // narHash
-        fingerprint.extend(self.nar_hash.to_typed_base32().as_bytes());
-        fingerprint.extend(b";");
-
-        // narSize
-        let mut buf = itoa::Buffer::new();
-        let nar_size = buf.format(self.nar_size);
-        fingerprint.extend(nar_size.as_bytes());
-        fingerprint.extend(b";");
-
-        // commaDelimitedReferences
-        let mut iter = self.references.iter().peekable();
-        while let Some(reference) = iter.next() {
-            fingerprint.extend(store_dir.as_os_str().as_bytes());
-            fingerprint.extend(b"/");
-            fingerprint.extend(reference.as_bytes());
-
-            if iter.peek().is_some() {
-                fingerprint.extend(b",");
-            }
-        }
-
-        fingerprint
+        let references: Vec<_> = self.references.iter().map(|r| store_dir.join(r)).collect();
+        attic::signing::fingerprint(&self.store_path, &self.nar_hash, self.nar_size, &references)
     }
 
     /// Signs the narinfo with a keypair, returning the signature.

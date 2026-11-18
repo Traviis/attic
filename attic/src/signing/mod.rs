@@ -22,6 +22,7 @@
 //! from and to the canonical format.
 
 use std::convert::TryInto;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize, de, ser};
@@ -31,9 +32,45 @@ use displaydoc::Display;
 use ed25519_compact::{Error as SignatureError, KeyPair, PublicKey, Signature};
 
 use crate::error::AtticResult;
+use crate::hash::Hash;
 
 #[cfg(test)]
 mod tests;
+
+/// Constructs the Nix signing fingerprint with full, sorted reference paths.
+pub fn fingerprint<P: AsRef<Path>>(
+    store_path: &Path,
+    nar_hash: &Hash,
+    nar_size: usize,
+    references: &[P],
+) -> Vec<u8> {
+    let mut fingerprint = b"1;".to_vec();
+
+    // 1;{storePath};{narHash};{narSize};{commaDelimitedReferences}
+
+    // storePath
+    fingerprint.extend(store_path.as_os_str().as_encoded_bytes());
+    fingerprint.push(b';');
+
+    // narHash
+    fingerprint.extend(nar_hash.to_typed_base32().as_bytes());
+    fingerprint.push(b';');
+
+    // narSize
+    fingerprint.extend(nar_size.to_string().as_bytes());
+    fingerprint.push(b';');
+
+    // commaDelimitedReferences
+    let mut references: Vec<_> = references.iter().map(|p| p.as_ref()).collect();
+    references.sort_unstable();
+    for (index, reference) in references.iter().enumerate() {
+        if index != 0 {
+            fingerprint.push(b',');
+        }
+        fingerprint.extend(reference.as_os_str().as_encoded_bytes());
+    }
+    fingerprint
+}
 
 /// An ed25519 keypair for signing.
 #[derive(Debug)]
