@@ -106,7 +106,7 @@ pub(crate) fn verify(
             status,
             public_key: key.map(|key| key.public_key.export()),
             metadata: key.map(|key| key.metadata.clone()),
-            source: key.map(|_| "static"),
+            source: key.map(|key| key.source),
             identity_mismatch: key.is_some() && !matches,
         });
     }

@@ -27,6 +27,7 @@ mod middleware;
 mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
+mod registry;
 mod storage;
 pub mod telemetry;
 mod upload_verification;
@@ -71,6 +72,8 @@ pub struct StateInner {
     /// The Attic Server configuration.
     config: Config,
 
+    registry: tokio::sync::Mutex<registry::Registry>,
+
     /// Handle to the database.
     database: OnceCell<DatabaseConnection>,
 
@@ -111,12 +114,29 @@ struct RequestStateInner {
 
 impl StateInner {
     async fn new(config: Config) -> State {
-        Arc::new(Self {
+        let mut registry = registry::Registry::new(config.upload_verification.clone());
+        registry.refresh().await;
+        let resolver_enabled = config.upload_verification.resolver.is_some();
+        let state = Arc::new(Self {
+            registry: tokio::sync::Mutex::new(registry),
             config,
             database: OnceCell::new(),
             storage: OnceCell::new(),
             access_tracker: OnceCell::new(),
-        })
+        });
+        if resolver_enabled {
+            let weak = Arc::downgrade(&state);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let Some(state) = weak.upgrade() else {
+                        break;
+                    };
+                    state.registry.lock().await.refresh_if_due().await;
+                }
+            });
+        }
+        state
     }
 
     /// Returns a handle to the database.
