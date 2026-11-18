@@ -25,7 +25,7 @@ struct Document {
     keys: Vec<serde_json::Value>,
 }
 
-pub(crate) fn parse_source(bytes: &[u8]) -> Result<BTreeMap<String, RegisteredKey>> {
+fn parse_source(bytes: &[u8]) -> Result<Source> {
     let document: Document = serde_json::from_slice(bytes)?;
     if document.version != 1 {
         bail!("unsupported registry version: {}", document.version);
@@ -71,21 +71,25 @@ pub(crate) fn parse_source(bytes: &[u8]) -> Result<BTreeMap<String, RegisteredKe
             Err(error) => tracing::error!(%error, "Invalid registry entry skipped"),
         }
     }
-    Ok(keys)
+    Ok(Source { keys, rejected })
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct Source {
     pub keys: BTreeMap<String, RegisteredKey>,
+    rejected: BTreeSet<String>,
 }
 
 impl Source {
     pub fn replace(&mut self, bytes: &[u8]) -> Result<()> {
-        let keys = parse_source(bytes)?;
-        if keys.is_empty() && !self.keys.is_empty() {
+        let source = parse_source(bytes)?;
+        if source.keys.is_empty()
+            && source.rejected.is_empty()
+            && (!self.keys.is_empty() || !self.rejected.is_empty())
+        {
             bail!("registry source returned zero keys after a nonempty snapshot");
         }
-        self.keys = keys;
+        *self = source;
         Ok(())
     }
 }
@@ -232,6 +236,10 @@ impl Registry {
             ("command", &self.command.keys),
         ])
         .0;
+        for name in self.file.rejected.union(&self.command.rejected) {
+            policy.trusted_keys.remove(name);
+            crate::audit::emit(&serde_json::json!({"event":"registry.conflict","key_name":name}));
+        }
         policy
     }
 }
@@ -310,7 +318,9 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({"publicKey":"invalid"}));
-        let keys = parse_source(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let keys = parse_source(&serde_json::to_vec(&doc).unwrap())
+            .unwrap()
+            .keys;
         assert_eq!(keys.len(), 1);
         assert_eq!(keys["alice"].public_key.export(), key);
         assert_eq!(
@@ -344,6 +354,27 @@ mod tests {
         tokio::fs::write(&path, b"invalid").await.unwrap();
         registry.refresh().await;
         assert!(registry.policy().trusted_keys.contains_key("bob"));
+    }
+
+    #[tokio::test]
+    async fn conflicting_document_name_quarantines_static_key() {
+        let alice = NixKeypair::generate("alice").unwrap().export_public_key();
+        let other = NixKeypair::generate("alice").unwrap().export_public_key();
+        let policy = toml::from_str(&format!("trusted-public-keys=[{alice:?}]")).unwrap();
+        let mut registry = Registry::new(policy);
+        let document = serde_json::to_vec(
+            &serde_json::json!({"version":1,"keys":[{"publicKey":alice},{"publicKey":other}]}),
+        )
+        .unwrap();
+        registry.file.replace(&document).unwrap();
+        assert!(!registry.policy().trusted_keys.contains_key("alice"));
+        assert!(
+            registry
+                .file
+                .replace(br#"{"version":1,"keys":[]}"#)
+                .is_err()
+        );
+        assert!(!registry.policy().trusted_keys.contains_key("alice"));
     }
 
     #[cfg(unix)]
@@ -441,7 +472,7 @@ mod tests {
             assert_eq!(source.keys["alice"].public_key.export(), key);
         }
         let other = parse_source(&document(&other)).unwrap();
-        let (keys, conflicts) = merge([("file", &source.keys), ("command", &other)]);
+        let (keys, conflicts) = merge([("file", &source.keys), ("command", &other.keys)]);
         assert!(keys.is_empty());
         assert!(conflicts.contains("alice"));
     }

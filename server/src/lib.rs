@@ -27,6 +27,7 @@ mod middleware;
 mod narinfo;
 pub mod nix_manifest;
 pub mod oobe;
+mod policy;
 mod registry;
 mod storage;
 pub mod telemetry;

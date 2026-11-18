@@ -77,9 +77,48 @@ fn refresh_limit() -> String {
 
 /// Cache-local override of the server verification switch.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CacheVerification {
     pub enabled: bool,
+    pub policy_hook: Option<PolicyHook>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct PolicyHook {
+    pub command: Option<Vec<String>>,
+    pub url: Option<String>,
+    #[serde(default = "policy_timeout", with = "humantime_serde")]
+    pub timeout: std::time::Duration,
+}
+
+fn policy_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(2)
+}
+
+impl PolicyHook {
+    fn validate(&self) -> Result<()> {
+        if self.command.is_some() == self.url.is_some() {
+            bail!("policy hook requires exactly one command or URL");
+        }
+        if self.timeout.is_zero() {
+            bail!("policy hook timeout must be positive");
+        }
+        if self
+            .command
+            .as_ref()
+            .is_some_and(|command| command.is_empty() || command[0].is_empty())
+        {
+            bail!("policy hook command cannot be empty");
+        }
+        if let Some(url) = &self.url {
+            let url = reqwest::Url::parse(url)?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                bail!("policy hook URL must use HTTP or HTTPS");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Validated upload-verification configuration.
@@ -93,6 +132,7 @@ pub struct UploadVerification {
     pub caches: BTreeMap<String, CacheVerification>,
     pub trusted_keys: BTreeMap<String, RegisteredKey>,
     pub resolver: Option<Resolver>,
+    pub policy_hook: Option<PolicyHook>,
 }
 
 #[derive(Default, Deserialize)]
@@ -106,6 +146,7 @@ struct Settings {
     trusted_keys: Vec<TrustedKey>,
     caches: BTreeMap<String, CacheVerification>,
     resolver: Option<Resolver>,
+    policy_hook: Option<PolicyHook>,
 }
 
 impl Default for UploadVerification {
@@ -117,6 +158,13 @@ impl Default for UploadVerification {
 }
 
 impl UploadVerification {
+    pub fn hook_for_cache(&self, cache: &str) -> Option<&PolicyHook> {
+        self.caches
+            .get(cache)
+            .and_then(|cache| cache.policy_hook.as_ref())
+            .or(self.policy_hook.as_ref())
+    }
+
     pub fn enabled_for_cache(&self, cache: &str) -> bool {
         self.caches.get(cache).map_or(self.enabled, |c| c.enabled)
     }
@@ -126,6 +174,14 @@ impl TryFrom<Settings> for UploadVerification {
     type Error = anyhow::Error;
 
     fn try_from(settings: Settings) -> Result<Self> {
+        for hook in settings.policy_hook.iter().chain(
+            settings
+                .caches
+                .values()
+                .filter_map(|cache| cache.policy_hook.as_ref()),
+        ) {
+            hook.validate()?;
+        }
         let min_signatures = settings.min_signatures.unwrap_or(1);
         if min_signatures == 0 {
             bail!("upload-verification.min-signatures must be at least 1");
@@ -182,6 +238,7 @@ impl TryFrom<Settings> for UploadVerification {
             caches: settings.caches,
             trusted_keys: keys,
             resolver: settings.resolver,
+            policy_hook: settings.policy_hook,
         })
     }
 }
@@ -271,6 +328,24 @@ mod tests {
     }
 
     #[test]
+    fn cache_hook_overrides_server_hook() {
+        let policy: UploadVerification = toml::from_str("[policy-hook]\ncommand=['server-policy']\n[caches.private]\nenabled=true\n[caches.private.policy-hook]\nurl='http://localhost/private'").unwrap();
+        assert_eq!(
+            policy.hook_for_cache("private").unwrap().url.as_deref(),
+            Some("http://localhost/private")
+        );
+        assert_eq!(
+            policy
+                .hook_for_cache("other")
+                .unwrap()
+                .command
+                .as_ref()
+                .unwrap(),
+            &["server-policy"]
+        );
+    }
+
+    #[test]
     fn rejects_conflicts_and_invalid_configuration() {
         let key = key();
         let other = self::key();
@@ -279,6 +354,11 @@ mod tests {
             format!("[[trusted-keys]]\npublic-key={key:?}\n[[trusted-keys]]\npublic-key={key:?}"),
             "trusted-public-keys=[\"malformed\"]".to_owned(),
             "min-signatures=0".to_owned(),
+            "[policy-hook]".to_owned(),
+            "[policy-hook]\ncommand=[]".to_owned(),
+            "[policy-hook]\ncommand=['true']\nurl='http://localhost'".to_owned(),
+            "[policy-hook]\nurl='file:///tmp/policy'".to_owned(),
+            "[policy-hook]\nurl='http://localhost'\ntimeout='0s'".to_owned(),
             format!("[[trusted-keys]]\npublic-key={key:?}\nvalid-until=\"invalid\""),
             format!(
                 "[[trusted-keys]]\npublic-key={key:?}\n[trusted-keys.metadata]\nidentity=[\"alice\"]"
