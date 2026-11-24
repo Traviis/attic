@@ -1,6 +1,6 @@
 [package]
 name = "attic-client"
-version = "2026.11.1"
+version = "2026.11.2"
 edition = "2024"
 publish = false
 
