@@ -27,6 +27,12 @@ And yes, it works on macOS too!
 - **Scalabilty**: Attic can be easily replicated. It's designed to be deployed to serverless platforms like fly.io but also works nicely in a single-machine setup.
 - **Garbage Collection**: Unused store paths can be garbage-collected in an LRU manner.
 
+## Optional external authentication
+
+Attic can verify external RS256 identity JWTs alongside static Attic tokens.
+See [external JWT configuration and rotating client credentials](docs/external-jwt.md),
+including Vault issuance and the Nix netrc refresh limitation.
+
 ## OCI images and releases
 
 Build an OCI image archive with Nix:

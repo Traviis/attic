@@ -11,14 +11,14 @@ use futures::{
     stream::{self, StreamExt, TryStream, TryStreamExt},
 };
 use reqwest::{
-    Body, Client as HttpClient, Response, StatusCode, Url,
+    Body, Client as HttpClient, Method, RequestBuilder, Response, StatusCode, Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},
 };
 use serde::Deserialize;
 use tokio::io::BufReader;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, ServerTokenConfig};
 use crate::version::ATTIC_DISTRIBUTOR;
 use attic::api::v1::cache_config::{CacheConfig, CreateCacheRequest, ListCachesResponse};
 use attic::api::v1::get_missing_paths::{GetMissingPathsRequest, GetMissingPathsResponse};
@@ -44,6 +44,8 @@ pub struct ApiClient {
 
     /// An initialized HTTP client.
     client: HttpClient,
+
+    token: Option<ServerTokenConfig>,
 }
 
 /// An API error.
@@ -66,12 +68,27 @@ pub struct StructuredApiError {
 
 impl ApiClient {
     pub fn from_server_config(config: ServerConfig) -> Result<Self> {
-        let client = build_http_client(config.token()?.as_deref());
+        let client = build_http_client();
 
         Ok(Self {
             endpoint: Url::parse(&config.endpoint)?,
             client,
+            token: config.token,
         })
+    }
+
+    /// Resolve credentials for every request so atomic agent updates are visible
+    /// to long-running push/watch clients. A configured file failure is fatal.
+    fn request(&self, method: Method, endpoint: Url) -> Result<RequestBuilder> {
+        let mut request = self.client.request(method, endpoint);
+        if let Some(source) = &self.token {
+            let token = source.get()?;
+            let mut header = HeaderValue::from_str(&format!("bearer {token}"))
+                .map_err(|_| anyhow::anyhow!("Invalid token HTTP header"))?;
+            header.set_sensitive(true);
+            request = request.header(AUTHORIZATION, header);
+        }
+        Ok(request)
     }
 
     /// Sets the API endpoint of this client.
@@ -83,7 +100,7 @@ impl ApiClient {
     /// Returns the caches visible to the caller.
     pub async fn list_caches(&self) -> Result<ListCachesResponse> {
         let endpoint = self.endpoint.join("_api/v1/cache-config")?;
-        let res = self.client.get(endpoint).send().await?;
+        let res = self.request(Method::GET, endpoint)?.send().await?;
 
         if res.status().is_success() {
             let response = res.json().await?;
@@ -101,7 +118,7 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.client.get(endpoint).send().await?;
+        let res = self.request(Method::GET, endpoint)?.send().await?;
 
         if res.status().is_success() {
             let cache_config = res.json().await?;
@@ -119,7 +136,11 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.client.post(endpoint).json(&request).send().await?;
+        let res = self
+            .request(Method::POST, endpoint)?
+            .json(&request)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             Ok(())
@@ -136,7 +157,11 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.client.patch(endpoint).json(&config).send().await?;
+        let res = self
+            .request(Method::PATCH, endpoint)?
+            .json(&config)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             Ok(())
@@ -153,7 +178,7 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.client.delete(endpoint).send().await?;
+        let res = self.request(Method::DELETE, endpoint)?.send().await?;
 
         if res.status().is_success() {
             Ok(())
@@ -175,7 +200,11 @@ impl ApiClient {
             store_path_hashes,
         };
 
-        let res = self.client.post(endpoint).json(&payload).send().await?;
+        let res = self
+            .request(Method::POST, endpoint)?
+            .json(&payload)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             let cache_config = res.json().await?;
@@ -201,7 +230,7 @@ impl ApiClient {
         let endpoint = self.endpoint.join("_api/v1/upload-path")?;
         let upload_info_json = serde_json::to_string(&nar_info)?;
 
-        let mut req = self.client.put(endpoint);
+        let mut req = self.request(Method::PUT, endpoint)?;
 
         let use_preamble = force_preamble || upload_info_json.len() >= NAR_INFO_PREAMBLE_THRESHOLD;
         let preamble_len = upload_info_json.len();
@@ -267,18 +296,16 @@ impl fmt::Display for StructuredApiError {
     }
 }
 
-fn build_http_client(token: Option<&str>) -> HttpClient {
+fn build_http_client() -> HttpClient {
     let mut headers = HeaderMap::new();
 
     headers.insert(USER_AGENT, HeaderValue::from_str(ATTIC_USER_AGENT).unwrap());
-
-    if let Some(token) = token {
-        let auth_header = HeaderValue::from_str(&format!("bearer {}", token)).unwrap();
-        headers.insert(AUTHORIZATION, auth_header);
-    }
 
     reqwest::Client::builder()
         .default_headers(headers)
         .build()
         .unwrap()
 }
+
+#[cfg(test)]
+mod tests;

@@ -71,8 +71,8 @@ pub struct Model {
 
     /// The uploader of the object.
     ///
-    /// This is a "username." Currently, it's set to the `sub` claim in
-    /// the client's JWT.
+    /// Static tokens retain their `sub`; external JWT identities use the
+    /// compact JSON pair `[issuer, subject]`.
     pub created_by: Option<String>,
 }
 

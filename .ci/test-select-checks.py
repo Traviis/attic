@@ -26,7 +26,7 @@ class SelectionTests(unittest.TestCase):
             names = [
                 "basic-sqlite-local", "basic-sqlite-garage",
                 "basic-postgres-local", "basic-postgres-garage", "lix",
-                "access-update-performance",
+                "access-update-performance", "external-jwt", "external-jwt-vm",
             ]
             self.matrix = {"include": [
                 {"name": prefix + name, "attr": prefix + name, "os": ["ubuntu-24.04"]}
@@ -44,7 +44,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_full_excludes_benchmarks(self):
         matrix, rust = checks.select(self.matrix, full=True)
-        self.assertEqual(len(matrix["include"]), 9)
+        self.assertEqual(len(matrix["include"]), 13)
         self.assertNotIn("stable-lix", {entry["name"] for entry in matrix["include"]})
         self.assertEqual(len(rust["include"]), 10)
         self.assertFalse(checks.BENCHMARKS & {entry["name"] for entry in matrix["include"]})

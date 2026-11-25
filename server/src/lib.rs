@@ -75,6 +75,8 @@ pub struct StateInner {
 
     registry: tokio::sync::Mutex<registry::Registry>,
 
+    external_jwt: Option<access::external::ExternalJwt>,
+
     /// Handle to the database.
     database: OnceCell<DatabaseConnection>,
 
@@ -118,14 +120,26 @@ impl StateInner {
         let mut registry = registry::Registry::new(config.upload_verification.clone());
         registry.refresh().await;
         let resolver_enabled = config.upload_verification.resolver.is_some();
+        let external_jwt = config
+            .jwt
+            .external
+            .clone()
+            .map(access::external::ExternalJwt::new)
+            .transpose()
+            .expect("Invalid external JWT configuration");
+        if let Some(external) = &external_jwt {
+            external.refresh_if_due().await;
+        }
+        let external_enabled = external_jwt.is_some();
         let state = Arc::new(Self {
+            external_jwt,
             registry: tokio::sync::Mutex::new(registry),
             config,
             database: OnceCell::new(),
             storage: OnceCell::new(),
             access_tracker: OnceCell::new(),
         });
-        if resolver_enabled {
+        if resolver_enabled || external_enabled {
             let weak = Arc::downgrade(&state);
             tokio::spawn(async move {
                 loop {
@@ -134,6 +148,9 @@ impl StateInner {
                         break;
                     };
                     state.registry.lock().await.refresh_if_due().await;
+                    if let Some(external) = &state.external_jwt {
+                        external.refresh_if_due().await;
+                    }
                 }
             });
         }

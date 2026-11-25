@@ -491,7 +491,9 @@ dependencies = [
  "http-body-util",
  "humantime",
  "humantime-serde",
+ "indexmap 2.14.0",
  "itoa",
+ "jwt-simple",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -535,6 +537,7 @@ dependencies = [
  "regex",
  "rsa 0.10.0-rc.18",
  "serde",
+ "serde_json",
  "serde_with",
  "tracing",
 ]

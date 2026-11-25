@@ -130,7 +130,10 @@ macro_rules! require_permission_function {
 
 /// A validated JSON Web Token.
 #[derive(Debug)]
-pub struct Token(JWTClaims<TokenClaims>);
+pub struct Token {
+    claims: JWTClaims<TokenClaims>,
+    external_principal: Option<String>,
+}
 
 /// Claims of a JSON Web Token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,18 +277,27 @@ impl Token {
             SignatureType::HS256(key) => key
                 .verify_token(token, Some(opts))
                 .map_err(Error::TokenError)
-                .map(Token),
+                .map(|claims| Self {
+                    claims,
+                    external_principal: None,
+                }),
             SignatureType::RS256(key) => {
                 let public_key = key.public_key();
                 public_key
                     .verify_token(token, Some(opts))
                     .map_err(Error::TokenError)
-                    .map(Token)
+                    .map(|claims| Self {
+                        claims,
+                        external_principal: None,
+                    })
             }
             SignatureType::RS256PubkeyOnly(key) => key
                 .verify_token(token, Some(opts))
                 .map_err(Error::TokenError)
-                .map(Token),
+                .map(|claims| Self {
+                    claims,
+                    external_principal: None,
+                }),
         }
     }
 
@@ -297,22 +309,62 @@ impl Token {
 
         let now_epoch = Utc::now().signed_duration_since(DateTime::UNIX_EPOCH);
 
-        Self(JWTClaims {
-            issued_at: None,
-            expires_at: Some(UnixTimeStamp::from_secs(
-                exp.timestamp().try_into().unwrap(),
-            )),
-            invalid_before: Some(Duration::new(
-                now_epoch.num_seconds().try_into().unwrap(),
-                0,
-            )),
-            issuer: None,
-            subject: Some(sub),
-            audiences: None,
-            jwt_id: None,
-            nonce: None,
-            custom: claims,
-        })
+        Self {
+            claims: JWTClaims {
+                issued_at: None,
+                expires_at: Some(UnixTimeStamp::from_secs(
+                    exp.timestamp().try_into().unwrap(),
+                )),
+                invalid_before: Some(Duration::new(
+                    now_epoch.num_seconds().try_into().unwrap(),
+                    0,
+                )),
+                issuer: None,
+                subject: Some(sub),
+                audiences: None,
+                jwt_id: None,
+                nonce: None,
+                custom: claims,
+            },
+            external_principal: None,
+        }
+    }
+
+    /// Constructs local permissions from externally verified identity claims.
+    ///
+    /// The caller must verify signature, issuer, audience and lifetime first. Custom
+    /// claims are discarded, particularly any externally supplied Attic grants.
+    pub fn from_verified_external_claims<T>(claims: JWTClaims<T>) -> Self {
+        let external_principal =
+            Some(serde_json::to_string(&(&claims.issuer, &claims.subject)).unwrap());
+        Self {
+            claims: JWTClaims {
+                issued_at: claims.issued_at,
+                expires_at: claims.expires_at,
+                invalid_before: claims.invalid_before,
+                issuer: claims.issuer,
+                subject: claims.subject,
+                audiences: claims.audiences,
+                jwt_id: claims.jwt_id,
+                nonce: claims.nonce,
+                custom: TokenClaims {
+                    attic_ns: AtticAccess::default(),
+                },
+            },
+            external_principal,
+        }
+    }
+
+    /// Effective identity for attribution and signature identity matching.
+    /// Static tokens retain their historical subject; external identities are
+    /// the compact JSON pair `[issuer, subject]`, not a bare subject.
+    pub fn principal(&self) -> Option<&str> {
+        self.external_principal.as_deref().or_else(|| self.sub())
+    }
+
+    /// Returns the verified issuer, if present.
+    pub fn issuer(&self) -> Option<&str> {
+        self.claims.issuer.as_deref()
     }
 
     /// Encodes the token.
@@ -322,7 +374,7 @@ impl Token {
         maybe_bound_issuer: &Option<String>,
         maybe_bound_audiences: &Option<HashSet<String>>,
     ) -> Result<String> {
-        let mut token = self.0.clone();
+        let mut token = self.claims.clone();
 
         if let Some(issuer) = maybe_bound_issuer {
             token = token.with_issuer(issuer);
@@ -340,12 +392,12 @@ impl Token {
 
     /// Returns the subject of the token.
     pub fn sub(&self) -> Option<&str> {
-        self.0.subject.as_deref()
+        self.claims.subject.as_deref()
     }
 
     /// Returns the claims as a serializable value.
     pub fn opaque_claims(&self) -> &impl Serialize {
-        &self.0
+        &self.claims
     }
 
     /// Returns a mutable reference to a permission entry.
@@ -381,11 +433,11 @@ impl Token {
     }
 
     fn attic_access(&self) -> &AtticAccess {
-        &self.0.custom.attic_ns
+        &self.claims.custom.attic_ns
     }
 
     fn attic_access_mut(&mut self) -> &mut AtticAccess {
-        &mut self.0.custom.attic_ns
+        &mut self.claims.custom.attic_ns
     }
 }
 

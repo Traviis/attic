@@ -5,13 +5,13 @@
 //! experience (e.g., `attic login`).
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions, Permissions, read_to_string};
-use std::io::Write;
+use std::fs::{self, OpenOptions, Permissions};
+use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use xdg::BaseDirectories;
 
@@ -52,7 +52,7 @@ pub struct ConfigData {
 }
 
 /// Configuration of a server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServerConfig {
     pub endpoint: String,
     #[serde(rename = "upload-compression")]
@@ -60,6 +60,38 @@ pub struct ServerConfig {
     pub upload_compression: bool,
     #[serde(flatten)]
     pub token: Option<ServerTokenConfig>,
+}
+
+impl<'de> Deserialize<'de> for ServerConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            endpoint: String,
+            #[serde(rename = "upload-compression", default = "default_upload_compression")]
+            upload_compression: bool,
+            token: Option<String>,
+            #[serde(rename = "token-file")]
+            token_file: Option<String>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        let token = match (fields.token, fields.token_file) {
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "token and token-file are mutually exclusive",
+                ));
+            }
+            (Some(token), None) => Some(ServerTokenConfig::Raw { token }),
+            (None, Some(token_file)) => Some(ServerTokenConfig::File { token_file }),
+            (None, None) => None,
+        };
+        Ok(Self {
+            endpoint: fields.endpoint,
+            upload_compression: fields.upload_compression,
+            token,
+        })
+    }
 }
 
 fn default_upload_compression() -> bool {
@@ -73,8 +105,8 @@ impl ServerConfig {
 }
 
 /// Configured server token
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum ServerTokenConfig {
     Raw {
         token: String,
@@ -85,14 +117,39 @@ pub enum ServerTokenConfig {
     },
 }
 
+impl std::fmt::Debug for ServerTokenConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw { .. } => formatter.write_str("Raw { token: [REDACTED] }"),
+            Self::File { token_file } => formatter
+                .debug_struct("File")
+                .field("token_file", token_file)
+                .finish(),
+        }
+    }
+}
+
 impl ServerTokenConfig {
     /// Get the token either directly from the config or through the token file
     pub fn get(&self) -> Result<String> {
         match self {
             ServerTokenConfig::Raw { token } => Ok(token.clone()),
-            ServerTokenConfig::File { token_file } => Ok(read_to_string(token_file)
-                .map(|t| t.trim().to_string())
-                .with_context(|| format!("Failed to read token from {token_file}"))?),
+            ServerTokenConfig::File { token_file } => {
+                let mut token = String::new();
+                std::fs::File::open(token_file)
+                    .and_then(|file| file.take(16 * 1024 + 1).read_to_string(&mut token))
+                    .with_context(|| format!("Failed to read token file {token_file}"))?;
+                ensure!(token.len() <= 16 * 1024, "Token file exceeds 16 KiB");
+                let token = token
+                    .strip_suffix("\r\n")
+                    .or_else(|| token.strip_suffix('\n'))
+                    .unwrap_or(&token);
+                ensure!(
+                    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
+                    "Token file must contain one nonempty token without whitespace"
+                );
+                Ok(token.to_owned())
+            }
         }
     }
 }
@@ -264,5 +321,24 @@ mod tests {
         .unwrap();
 
         assert!(!config.servers.values().next().unwrap().upload_compression);
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_ambiguous_sources_and_redacts_debug() {
+        assert!(
+            toml::from_str::<ServerConfig>(
+                "endpoint='https://example'\ntoken='secret'\ntoken-file='/run/token'"
+            )
+            .is_err()
+        );
+        let source = ServerTokenConfig::Raw {
+            token: "never-display-this".into(),
+        };
+        assert!(!format!("{source:?}").contains("never-display-this"));
     }
 }
