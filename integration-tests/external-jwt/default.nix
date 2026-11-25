@@ -9,6 +9,7 @@ let
 in
 pkgs.runCommand "attic-external-jwt" {
   nativeBuildInputs = [ pkgs.attic pkgs.python3 vault ];
+  SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 } ''
   python3 ${./test.py}
   touch $out

@@ -67,6 +67,9 @@ def run():
             "HOME": directory,
             "XDG_CONFIG_HOME": directory,
         }
+        # Only forward the public CA bundle, never Vault credentials/config.
+        if "SSL_CERT_FILE" in os.environ:
+            env["SSL_CERT_FILE"] = os.environ["SSL_CERT_FILE"]
         processes = []
         with (
             (root / "vault.log").open("w+") as vault_log,
@@ -298,8 +301,11 @@ cc = 1
                 assert request(cache_url, rotated)[0] == 200
                 assert request(cache_url, good)[0] == 200
                 # Existing login supports supplied external JWT and file source.
-                subprocess.run(
-                    ["attic", "login", "isolated", attic_url, good], env=env, check=True
+                assert (
+                    subprocess.run(
+                        ["attic", "login", "isolated", attic_url, good], env=env
+                    ).returncode
+                    == 0
                 )
                 subprocess.run(
                     ["attic", "cache", "info", "isolated:test"], env=env, check=True
@@ -318,6 +324,26 @@ cc = 1
                     ],
                     env=env,
                     check=True,
+                )
+                subprocess.run(
+                    ["attic", "cache", "info", "isolated:test"], env=env, check=True
+                )
+                client_config = root / "attic/config.toml"
+                assert "token-file" in client_config.read_text()
+                assert rotated not in client_config.read_text()
+                token_file.unlink()
+                assert (
+                    subprocess.run(
+                        ["attic", "cache", "info", "isolated:test"], env=env
+                    ).returncode
+                    != 0
+                )
+                # Explicitly switch back to the original inline source.
+                assert (
+                    subprocess.run(
+                        ["attic", "login", "isolated", attic_url, good], env=env
+                    ).returncode
+                    == 0
                 )
                 subprocess.run(
                     ["attic", "cache", "info", "isolated:test"], env=env, check=True

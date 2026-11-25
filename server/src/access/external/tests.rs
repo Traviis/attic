@@ -135,7 +135,16 @@ async fn verifies_required_claims_algorithm_signature_and_cache_expiry() {
             .await
             .is_ok()
     );
-    for mutation in ["iss", "aud", "missing-iss", "missing-aud", "exp", "sub", "empty-sub", "nbf"] {
+    for mutation in [
+        "iss",
+        "aud",
+        "missing-iss",
+        "missing-aud",
+        "exp",
+        "sub",
+        "empty-sub",
+        "nbf",
+    ] {
         let mut invalid = claims.clone();
         match mutation {
             "iss" => invalid.issuer = Some("https://evil.example".into()),
@@ -157,7 +166,12 @@ async fn verifies_required_claims_algorithm_signature_and_cache_expiry() {
     }
     let mut without_nbf = claims.clone();
     without_nbf.invalid_before = None;
-    assert!(external.verify(&key.sign(without_nbf).unwrap()).await.is_ok());
+    assert!(
+        external
+            .verify(&key.sign(without_nbf).unwrap())
+            .await
+            .is_ok()
+    );
     let mut expired = claims.clone();
     expired.expires_at = Some(attic_token::UnixTimeStamp::from_secs(1));
     assert!(external.verify(&key.sign(expired).unwrap()).await.is_err());
@@ -276,10 +290,13 @@ async fn unknown_kid_refresh_is_single_flight_and_never_uses_token_urls() {
         }));
     let app = app.fallback({
         let requests = requests.clone();
-        move || { let requests = requests.clone(); async move {
-            requests.fetch_add(1000, Ordering::SeqCst);
-            axum::http::StatusCode::NOT_FOUND
-        }}
+        move || {
+            let requests = requests.clone();
+            async move {
+                requests.fetch_add(1000, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }
     });
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -320,5 +337,51 @@ async fn unknown_kid_refresh_is_single_flight_and_never_uses_token_urls() {
         assert!(task.await.unwrap());
     }
     assert_eq!(requests.load(Ordering::SeqCst), 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn discovery_rejects_redirects_mismatched_issuer_and_cross_origin_keys() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let mode = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new().route("/.well-known/openid-configuration", axum::routing::get({
+        let issuer = issuer.clone(); let mode = mode.clone();
+        move || { let issuer = issuer.clone(); let mode = mode.clone(); async move {
+            use axum::response::IntoResponse;
+            match mode.load(Ordering::SeqCst) {
+                0 => axum::response::Redirect::temporary("/must-not-follow").into_response(),
+                1 => axum::Json(json!({"issuer":"https://other.example", "jwks_uri":format!("{issuer}/keys")})).into_response(),
+                _ => axum::Json(json!({"issuer":issuer, "jwks_uri":"https://other.example/keys"})).into_response(),
+            }
+        }}
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut config = config();
+    config.issuer = issuer;
+    let external = ExternalJwt::new(config).unwrap();
+    for (mode_value, reason) in [
+        (0, "redirects are forbidden"),
+        (1, "discovery issuer mismatch"),
+        (2, "JWKS must share issuer origin"),
+    ] {
+        mode.store(mode_value, Ordering::SeqCst);
+        let mut cache = KeyCache::default();
+        assert!(
+            external
+                .refresh(&mut cache)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains(reason)
+        );
+        assert!(cache.fetched.is_none() && cache.keys.is_empty());
+    }
     server.abort();
 }

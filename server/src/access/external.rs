@@ -299,7 +299,12 @@ impl ExternalJwt {
             ..Default::default()
         };
         let claims: JWTClaims<Value> = key.verify_token(jwt, Some(options))?;
-        ensure!(claims.expires_at.is_some(), "external JWT requires exp");
+        ensure!(
+            claims
+                .expires_at
+                .is_some_and(|exp| jwt_simple::prelude::Clock::now_since_epoch() < exp),
+            "external JWT requires future exp"
+        );
         ensure!(
             claims
                 .subject
@@ -336,7 +341,9 @@ fn parse_keys(jwks: Jwks) -> Result<HashMap<String, RS256PublicKey>> {
         let n = URL_SAFE_NO_PAD.decode(jwk.n.context("RSA JWK requires n")?)?;
         let e = URL_SAFE_NO_PAD.decode(jwk.e.context("RSA JWK requires e")?)?;
         ensure!(
-            (n.len() > 256 || (n.len() == 256 && n[0] >= 128)) && n.len() <= 1024,
+            n.first().is_some_and(|first| *first != 0)
+                && (n.len() > 256 || (n.len() == 256 && n[0] >= 128))
+                && n.len() <= 1024,
             "RSA modulus must be 2048..8192 bits"
         );
         let key = RS256PublicKey::from_components(&n, &e)?;

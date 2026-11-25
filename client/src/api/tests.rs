@@ -57,12 +57,36 @@ async fn token_file_is_reread_per_request_and_fails_closed() {
     assert!(requests[1].contains("authorization: bearer second\r\n"));
     for invalid in ["", "\n", "one\ntwo", " space", "token\n\n"] {
         std::fs::write(&path, invalid).unwrap();
-        assert!(client.list_caches().await.is_err());
+        let error = client.list_caches().await.unwrap_err();
+        assert!(error.to_string().contains("Token file must contain"));
     }
     std::fs::write(&path, "x".repeat(16 * 1024 + 1)).unwrap();
-    assert!(client.list_caches().await.is_err());
-    std::fs::remove_file(path).unwrap();
-    assert!(client.list_caches().await.is_err());
+    assert!(
+        client
+            .list_caches()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 16 KiB")
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        client
+            .list_caches()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read token file")
+    );
+    std::fs::create_dir(&path).unwrap();
+    assert!(
+        client
+            .list_caches()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read token file")
+    );
 }
 
 #[tokio::test]

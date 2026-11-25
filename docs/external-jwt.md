@@ -157,6 +157,7 @@ JWT. Attic file refresh only covers requests sent by the Attic client.
 Attic processes inside the Nix build sandbox, with temporary state, literal
 loopback endpoints, and no inherited Vault configuration. It covers mapped and
 unmapped permissions, audience/issuer/expiry rejection, Vault key rotation,
-retained keys, static token coexistence, and inline/file login. This check is in
+retained keys, static token coexistence, issuer-qualified upload attribution, and
+inline/file login source switching. This check is in
 the routine Linux CI set. Rust tests additionally cover claim/key constraints,
 cache limits, mapping precedence, and per-request atomic file replacement.
