@@ -161,3 +161,10 @@ retained keys, static token coexistence, issuer-qualified upload attribution, an
 inline/file login source switching. This check is in
 the routine Linux CI set. Rust tests additionally cover claim/key constraints,
 cache limits, mapping precedence, and per-request atomic file replacement.
+
+`nix build -L --no-link .#checks.x86_64-linux.external-jwt-vm` boots a NixOS
+VM and runs the same real Vault/Attic qualification inside the guest. This
+requires KVM and verifies guest boot plus the packaged binaries and their runtime
+dependencies in NixOS. Both services use guest-local loopback; this does not test
+cross-host TLS or a deployed Vault instance. The VM check runs in routine Linux
+CI; `stable-external-jwt-vm` is included in full qualification.

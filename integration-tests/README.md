@@ -23,9 +23,9 @@ symlink. Negative narinfo caching is disabled for that restoration because the
 fixture's build queries the cache before its first upload.
 
 Both `lix` and `stable-lix` are available as flake checks. Routine CI runs
-`basic-sqlite-local`, `basic-postgres-garage`, `lix`, and `external-jwt`. Manual Build dispatch
-with `full` enabled, and release qualification, run nine functional VM
-variants, including stable nixpkgs database/storage variants. `stable-lix` is
+`basic-sqlite-local`, `basic-postgres-garage`, `lix`, `external-jwt`, and
+`external-jwt-vm`. Manual Build dispatch with `full` enabled, and release
+qualification, include stable nixpkgs database/storage and external JWT variants. `stable-lix` is
 excluded from every CI mode to avoid redundant Lix/toolchain source builds;
 it remains directly runnable as a flake check. Lix versions follow their
 respective locked nixpkgs inputs.
@@ -59,3 +59,9 @@ escalation, issuer/audience/expiry, real key rotation, static coexistence, uploa
 attribution, and inline/file login. `stable-external-jwt` qualifies the stable
 nixpkgs toolchain during full CI. Vault's BSL license is permitted only for this
 test dependency. See [the external auth guide](../docs/external-jwt.md).
+
+`nix build -L --no-link .#checks.x86_64-linux.external-jwt-vm` boots NixOS
+and runs the same qualification with real Vault and Attic inside the guest.
+KVM is required. Guest-local loopback keeps the test isolated; cross-host TLS is
+not exercised. Routine CI includes this VM check, and full qualification also
+includes `stable-external-jwt-vm`. The native sandbox check remains available.
