@@ -157,6 +157,10 @@ pub struct Config {
 /// JSON Web Token configuration.
 #[derive(Clone, Deserialize, derive_more::Debug)]
 pub struct JWTConfig {
+    /// Optional trusted external identity provider.
+    #[serde(default, deserialize_with = "crate::access::external::deserialize_config")]
+    pub external: Option<crate::access::external::ExternalJwtConfig>,
+
     /// The `iss` claim of the JWT.
     ///
     /// If specified, received JWTs must have this claim, and its value must match this
@@ -437,6 +441,7 @@ fn load_database_url_from_env() -> String {
 impl Default for JWTConfig {
     fn default() -> Self {
         Self {
+            external: None,
             token_bound_issuer: None,
             token_bound_audiences: None,
             signing_config: load_jwt_signing_config_from_env(),

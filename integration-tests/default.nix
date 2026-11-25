@@ -44,6 +44,7 @@ let
     };
   }) (lib.cartesianProduct matrix));
 in {
+  external-jwt = import ./external-jwt { inherit pkgs; };
   access-update-performance = runTest ./access-update-performance;
   lix = runTest {
     imports = [ ./basic ];

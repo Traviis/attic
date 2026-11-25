@@ -5,13 +5,13 @@
 //! experience (e.g., `attic login`).
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions, Permissions, read_to_string};
-use std::io::Write;
+use std::fs::{self, OpenOptions, Permissions};
+use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use xdg::BaseDirectories;
 
@@ -90,9 +90,17 @@ impl ServerTokenConfig {
     pub fn get(&self) -> Result<String> {
         match self {
             ServerTokenConfig::Raw { token } => Ok(token.clone()),
-            ServerTokenConfig::File { token_file } => Ok(read_to_string(token_file)
-                .map(|t| t.trim().to_string())
-                .with_context(|| format!("Failed to read token from {token_file}"))?),
+            ServerTokenConfig::File { token_file } => {
+                let mut token = String::new();
+                std::fs::File::open(token_file)
+                    .and_then(|file| file.take(16 * 1024 + 1).read_to_string(&mut token))
+                    .with_context(|| format!("Failed to read token file {token_file}"))?;
+                ensure!(token.len() <= 16 * 1024, "Token file exceeds 16 KiB");
+                let token = token.strip_suffix("\r\n").or_else(|| token.strip_suffix('\n')).unwrap_or(&token);
+                ensure!(!token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
+                    "Token file must contain one nonempty token without whitespace");
+                Ok(token.to_owned())
+            }
         }
     }
 }

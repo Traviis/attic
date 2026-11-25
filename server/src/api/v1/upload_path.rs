@@ -97,7 +97,9 @@ pub(crate) async fn upload_path(
     let subject = req_state.auth.username();
     let mut audit = enabled.then(|| serde_json::json!({
         "cache": "", "store_path": "", "nar_hash": "", "nar_size": 0,
-        "token.sub": subject,
+        "token.principal": subject,
+        "token.sub": req_state.auth.token.get().and_then(|token| token.sub()),
+        "token.iss": req_state.auth.token.get().and_then(|token| token.issuer()),
         "token.jti": req_state.auth.token.get().and_then(|token| serde_json::to_value(token.opaque_claims()).ok()).and_then(|claims| claims.get("jti").cloned()),
         "client.address": req_state.client_address,
         "signatures": [], "signatures.valid_count": 0,

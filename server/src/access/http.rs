@@ -34,9 +34,9 @@ impl AuthState {
 
     /// Returns the username if it exists.
     ///
-    /// Currently it's the `sub` claim of the JWT.
+    /// Static tokens use `sub`; external tokens use the issuer-qualified principal.
     pub fn username(&self) -> Option<&str> {
-        self.token.get().and_then(|token| token.sub())
+        self.token.get().and_then(|token| token.principal())
     }
 
     /// Finds and performs authorization for a cache.
@@ -100,28 +100,15 @@ impl AuthState {
 
 /// Performs auth.
 pub async fn apply_auth(req: Request, next: Next) -> Response {
-    let token: Option<Token> = req
-        .headers()
-        .get("Authorization")
+    let jwt = req.headers().get("Authorization")
         .and_then(|bytes| bytes.to_str().ok())
-        .and_then(parse_authorization_header)
-        .and_then(|jwt| {
-            let state = req.extensions().get::<State>().unwrap();
-            let signature_type = state.config.jwt.signing_config.clone().into();
-
-            let res_token = Token::from_jwt(
-                &jwt,
-                &signature_type,
-                &state.config.jwt.token_bound_issuer,
-                &state.config.jwt.token_bound_audiences,
-            );
-
-            if let Err(e) = &res_token {
-                tracing::debug!("Ignoring bad JWT token: {}", e);
-            }
-
-            res_token.ok()
-        });
+        .and_then(parse_authorization_header);
+    let token = if let Some(jwt) = jwt {
+        let state = req.extensions().get::<State>().unwrap();
+        authenticate(state, &jwt).await
+    } else {
+        None
+    };
 
     if let Some(token) = token {
         let req_state = req.extensions().get::<RequestState>().unwrap();
@@ -130,4 +117,21 @@ pub async fn apply_auth(req: Request, next: Next) -> Response {
     }
 
     next.run(req).await
+}
+
+/// Select one verifier only. Unverified issuer selection cannot grant authority,
+/// and a failed external verification never falls back to static Attic grants.
+pub(super) async fn authenticate(state: &State, jwt: &str) -> Option<Token> {
+    if jwt.len() > 16 * 1024 {
+        return None;
+    }
+    if let Some(external) = &state.external_jwt
+        && external.selects(jwt)
+    {
+        return external.verify(jwt).await.ok();
+    }
+    let signature_type = state.config.jwt.signing_config.clone().into();
+    Token::from_jwt(jwt, &signature_type,
+        &state.config.jwt.token_bound_issuer,
+        &state.config.jwt.token_bound_audiences).ok()
 }

@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-ROUTINE = {"basic-sqlite-local", "basic-postgres-garage", "lix"}
+ROUTINE = {"basic-sqlite-local", "basic-postgres-garage", "lix", "external-jwt"}
 BENCHMARKS = {"access-update-performance", "stable-access-update-performance"}
 
 
