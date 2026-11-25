@@ -332,11 +332,19 @@ cc = 1
                 assert "token-file" in client_config.read_text()
                 assert rotated not in client_config.read_text()
                 token_file.unlink()
+                missing_token = subprocess.run(
+                    ["attic", "cache", "info", "isolated:test"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                assert missing_token.returncode != 0
+                assert "Failed to read token file" in missing_token.stderr
+                assert str(token_file) in missing_token.stderr
+                assert not missing_token.stdout
                 assert (
-                    subprocess.run(
-                        ["attic", "cache", "info", "isolated:test"], env=env
-                    ).returncode
-                    != 0
+                    good not in missing_token.stderr
+                    and rotated not in missing_token.stderr
                 )
                 # Explicitly switch back to the original inline source.
                 assert (
