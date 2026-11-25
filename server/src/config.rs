@@ -158,7 +158,10 @@ pub struct Config {
 #[derive(Clone, Deserialize, derive_more::Debug)]
 pub struct JWTConfig {
     /// Optional trusted external identity provider.
-    #[serde(default, deserialize_with = "crate::access::external::deserialize_config")]
+    #[serde(
+        default,
+        deserialize_with = "crate::access::external::deserialize_config"
+    )]
     pub external: Option<crate::access::external::ExternalJwtConfig>,
 
     /// The `iss` claim of the JWT.

@@ -136,7 +136,11 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.request(Method::POST, endpoint)?.json(&request).send().await?;
+        let res = self
+            .request(Method::POST, endpoint)?
+            .json(&request)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             Ok(())
@@ -153,7 +157,11 @@ impl ApiClient {
             .join("_api/v1/cache-config/")?
             .join(cache.as_str())?;
 
-        let res = self.request(Method::PATCH, endpoint)?.json(&config).send().await?;
+        let res = self
+            .request(Method::PATCH, endpoint)?
+            .json(&config)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             Ok(())
@@ -192,7 +200,11 @@ impl ApiClient {
             store_path_hashes,
         };
 
-        let res = self.request(Method::POST, endpoint)?.json(&payload).send().await?;
+        let res = self
+            .request(Method::POST, endpoint)?
+            .json(&payload)
+            .send()
+            .await?;
 
         if res.status().is_success() {
             let cache_config = res.json().await?;
@@ -288,7 +300,6 @@ fn build_http_client() -> HttpClient {
     let mut headers = HeaderMap::new();
 
     headers.insert(USER_AGENT, HeaderValue::from_str(ATTIC_USER_AGENT).unwrap());
-
 
     reqwest::Client::builder()
         .default_headers(headers)

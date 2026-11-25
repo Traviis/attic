@@ -8,3 +8,6 @@ For a quick start, read the [Tutorial](../tutorial.md).
 - **[Deploying to NixOS](./deployment/nixos.md)** - Deploying to a NixOS machine
 - **[OpenTelemetry](./opentelemetry.md)** - Exporting traces, logs, and metrics with OTLP
 - **[Chunking](./chunking.md)** - Configuring Content-Defined Chunking data deduplication in Attic
+
+External JWT authentication and agent-managed credentials are documented in the
+[repository guide](https://github.com/Traviis/attic/blob/main/docs/external-jwt.md).

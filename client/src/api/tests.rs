@@ -14,11 +14,19 @@ fn recording_server(requests: usize) -> (String, std::thread::JoinHandle<Vec<Str
                 let mut byte = [0];
                 stream.read_exact(&mut byte).unwrap();
                 bytes.push(byte[0]);
-                if bytes.ends_with(b"\r\n\r\n") { break; }
+                if bytes.ends_with(b"\r\n\r\n") {
+                    break;
+                }
             }
             headers.push(String::from_utf8(bytes).unwrap());
             let body = r#"{"caches":[]}"#;
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
         }
         headers
     });
@@ -32,9 +40,13 @@ async fn token_file_is_reread_per_request_and_fails_closed() {
     std::fs::write(&path, "first\n").unwrap();
     let (endpoint, server) = recording_server(2);
     let client = ApiClient::from_server_config(ServerConfig {
-        endpoint, upload_compression: true,
-        token: Some(ServerTokenConfig::File { token_file: path.to_str().unwrap().into() }),
-    }).unwrap();
+        endpoint,
+        upload_compression: true,
+        token: Some(ServerTokenConfig::File {
+            token_file: path.to_str().unwrap().into(),
+        }),
+    })
+    .unwrap();
     client.list_caches().await.unwrap();
     let replacement = directory.path().join("replacement");
     std::fs::write(&replacement, "second\r\n").unwrap();
@@ -57,9 +69,13 @@ async fn token_file_is_reread_per_request_and_fails_closed() {
 async fn inline_token_still_authenticates_requests() {
     let (endpoint, server) = recording_server(1);
     let client = ApiClient::from_server_config(ServerConfig {
-        endpoint, upload_compression: true,
-        token: Some(ServerTokenConfig::Raw { token: "inline-token".into() }),
-    }).unwrap();
+        endpoint,
+        upload_compression: true,
+        token: Some(ServerTokenConfig::Raw {
+            token: "inline-token".into(),
+        }),
+    })
+    .unwrap();
     client.list_caches().await.unwrap();
     assert!(server.join().unwrap()[0].contains("authorization: bearer inline-token\r\n"));
 }

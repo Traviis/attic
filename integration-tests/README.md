@@ -23,7 +23,7 @@ symlink. Negative narinfo caching is disabled for that restoration because the
 fixture's build queries the cache before its first upload.
 
 Both `lix` and `stable-lix` are available as flake checks. Routine CI runs
-`basic-sqlite-local`, `basic-postgres-garage`, and `lix`. Manual Build dispatch
+`basic-sqlite-local`, `basic-postgres-garage`, `lix`, and `external-jwt`. Manual Build dispatch
 with `full` enabled, and release qualification, run nine functional VM
 variants, including stable nixpkgs database/storage variants. `stable-lix` is
 excluded from every CI mode to avoid redundant Lix/toolchain source builds;
@@ -48,3 +48,14 @@ This qualifies daemon/protocol interoperability, not compilation against Lix
 C++ libraries. It does not qualify macOS, ARM, content-addressed derivation
 realisations, watch-store, or interrupted uploads. The Lix variant uses SQLite
 and local storage; the existing Nix matrix separately covers PostgreSQL/Garage.
+
+## External JWT / Vault
+
+`nix build -L --no-link .#checks.x86_64-linux.external-jwt` runs real disposable
+Vault and Attic processes inside a native Nix sandbox (no KVM required). It uses
+literal loopback URLs, throwaway credentials, and temporary state, never the
+caller's Vault address/token/config. It checks mapped pull/push, denied privilege
+escalation, issuer/audience/expiry, real key rotation, static coexistence, upload
+attribution, and inline/file login. `stable-external-jwt` qualifies the stable
+nixpkgs toolchain during full CI. Vault's BSL license is permitted only for this
+test dependency. See [the external auth guide](../docs/external-jwt.md).

@@ -100,7 +100,9 @@ impl AuthState {
 
 /// Performs auth.
 pub async fn apply_auth(req: Request, next: Next) -> Response {
-    let jwt = req.headers().get("Authorization")
+    let jwt = req
+        .headers()
+        .get("Authorization")
         .and_then(|bytes| bytes.to_str().ok())
         .and_then(parse_authorization_header);
     let token = if let Some(jwt) = jwt {
@@ -122,7 +124,7 @@ pub async fn apply_auth(req: Request, next: Next) -> Response {
 /// Select one verifier only. Unverified issuer selection cannot grant authority,
 /// and a failed external verification never falls back to static Attic grants.
 pub(super) async fn authenticate(state: &State, jwt: &str) -> Option<Token> {
-    if jwt.len() > 16 * 1024 {
+    if state.external_jwt.is_some() && jwt.len() > 16 * 1024 {
         return None;
     }
     if let Some(external) = &state.external_jwt
@@ -131,7 +133,11 @@ pub(super) async fn authenticate(state: &State, jwt: &str) -> Option<Token> {
         return external.verify(jwt).await.ok();
     }
     let signature_type = state.config.jwt.signing_config.clone().into();
-    Token::from_jwt(jwt, &signature_type,
+    Token::from_jwt(
+        jwt,
+        &signature_type,
         &state.config.jwt.token_bound_issuer,
-        &state.config.jwt.token_bound_audiences).ok()
+        &state.config.jwt.token_bound_audiences,
+    )
+    .ok()
 }

@@ -52,7 +52,7 @@ pub struct ConfigData {
 }
 
 /// Configuration of a server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServerConfig {
     pub endpoint: String,
     #[serde(rename = "upload-compression")]
@@ -60,6 +60,38 @@ pub struct ServerConfig {
     pub upload_compression: bool,
     #[serde(flatten)]
     pub token: Option<ServerTokenConfig>,
+}
+
+impl<'de> Deserialize<'de> for ServerConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            endpoint: String,
+            #[serde(rename = "upload-compression", default = "default_upload_compression")]
+            upload_compression: bool,
+            token: Option<String>,
+            #[serde(rename = "token-file")]
+            token_file: Option<String>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        let token = match (fields.token, fields.token_file) {
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "token and token-file are mutually exclusive",
+                ));
+            }
+            (Some(token), None) => Some(ServerTokenConfig::Raw { token }),
+            (None, Some(token_file)) => Some(ServerTokenConfig::File { token_file }),
+            (None, None) => None,
+        };
+        Ok(Self {
+            endpoint: fields.endpoint,
+            upload_compression: fields.upload_compression,
+            token,
+        })
+    }
 }
 
 fn default_upload_compression() -> bool {
@@ -73,8 +105,8 @@ impl ServerConfig {
 }
 
 /// Configured server token
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum ServerTokenConfig {
     Raw {
         token: String,
@@ -83,6 +115,18 @@ pub enum ServerTokenConfig {
         #[serde(rename = "token-file")]
         token_file: String,
     },
+}
+
+impl std::fmt::Debug for ServerTokenConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw { .. } => formatter.write_str("Raw { token: [REDACTED] }"),
+            Self::File { token_file } => formatter
+                .debug_struct("File")
+                .field("token_file", token_file)
+                .finish(),
+        }
+    }
 }
 
 impl ServerTokenConfig {
@@ -96,9 +140,14 @@ impl ServerTokenConfig {
                     .and_then(|file| file.take(16 * 1024 + 1).read_to_string(&mut token))
                     .with_context(|| format!("Failed to read token file {token_file}"))?;
                 ensure!(token.len() <= 16 * 1024, "Token file exceeds 16 KiB");
-                let token = token.strip_suffix("\r\n").or_else(|| token.strip_suffix('\n')).unwrap_or(&token);
-                ensure!(!token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
-                    "Token file must contain one nonempty token without whitespace");
+                let token = token
+                    .strip_suffix("\r\n")
+                    .or_else(|| token.strip_suffix('\n'))
+                    .unwrap_or(&token);
+                ensure!(
+                    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
+                    "Token file must contain one nonempty token without whitespace"
+                );
                 Ok(token.to_owned())
             }
         }
@@ -272,5 +321,24 @@ mod tests {
         .unwrap();
 
         assert!(!config.servers.values().next().unwrap().upload_compression);
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_ambiguous_sources_and_redacts_debug() {
+        assert!(
+            toml::from_str::<ServerConfig>(
+                "endpoint='https://example'\ntoken='secret'\ntoken-file='/run/token'"
+            )
+            .is_err()
+        );
+        let source = ServerTokenConfig::Raw {
+            token: "never-display-this".into(),
+        };
+        assert!(!format!("{source:?}").contains("never-display-this"));
     }
 }

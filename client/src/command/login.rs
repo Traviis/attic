@@ -32,8 +32,17 @@ pub async fn run(opts: Opts) -> Result<()> {
     let mut config = Config::load()?;
     let mut config_m = config.as_mut();
 
-    let source = sub.token_file.as_ref().map(|path| ServerTokenConfig::File { token_file: path.clone() })
-        .or_else(|| sub.token.as_ref().map(|token| ServerTokenConfig::Raw { token: token.clone() }));
+    let source = sub
+        .token_file
+        .as_ref()
+        .map(|path| ServerTokenConfig::File {
+            token_file: path.clone(),
+        })
+        .or_else(|| {
+            sub.token.as_ref().map(|token| ServerTokenConfig::Raw {
+                token: token.clone(),
+            })
+        });
     // Check the explicitly selected source without persisting its contents.
     if let Some(source) = &source {
         source.get()?;
@@ -73,10 +82,29 @@ mod tests {
 
     #[test]
     fn login_supports_explicit_exclusive_sources() {
-        let inline = Login::try_parse_from(["login", "local", "http://localhost", "supplied-token"]).unwrap();
+        let inline =
+            Login::try_parse_from(["login", "local", "http://localhost", "supplied-token"])
+                .unwrap();
         assert_eq!(inline.token.as_deref(), Some("supplied-token"));
-        let file = Login::try_parse_from(["login", "local", "http://localhost", "--token-file", "/run/token"]).unwrap();
+        let file = Login::try_parse_from([
+            "login",
+            "local",
+            "http://localhost",
+            "--token-file",
+            "/run/token",
+        ])
+        .unwrap();
         assert_eq!(file.token_file.as_deref(), Some("/run/token"));
-        assert!(Login::try_parse_from(["login", "local", "http://localhost", "inline", "--token-file", "/run/token"]).is_err());
+        assert!(
+            Login::try_parse_from([
+                "login",
+                "local",
+                "http://localhost",
+                "inline",
+                "--token-file",
+                "/run/token"
+            ])
+            .is_err()
+        );
     }
 }

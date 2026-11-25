@@ -120,7 +120,13 @@ impl StateInner {
         let mut registry = registry::Registry::new(config.upload_verification.clone());
         registry.refresh().await;
         let resolver_enabled = config.upload_verification.resolver.is_some();
-        let external_jwt = config.jwt.external.clone().map(access::external::ExternalJwt::new).transpose().expect("Invalid external JWT configuration");
+        let external_jwt = config
+            .jwt
+            .external
+            .clone()
+            .map(access::external::ExternalJwt::new)
+            .transpose()
+            .expect("Invalid external JWT configuration");
         if let Some(external) = &external_jwt {
             external.refresh_if_due().await;
         }
