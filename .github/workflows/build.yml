@@ -14,6 +14,10 @@ on:
         default: false
   workflow_call:
     inputs:
+      platform:
+        description: Qualification platform (all, linux, or macos)
+        type: string
+        default: all
       full:
         type: boolean
         default: false
@@ -30,10 +34,12 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        os: >-
+          ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-latest"]' ||
+          inputs.platform == 'macos' && '["macos-latest"]' ||
+          '["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.0
@@ -108,6 +114,7 @@ jobs:
   tests:
     needs: nix-matrix
     strategy:
+      fail-fast: false
       matrix: ${{ fromJSON(needs.nix-matrix.outputs.rust) }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -243,10 +250,12 @@ jobs:
           ATTIC_MATRIX_FILE="$matrix_file" python3 .ci/test-select-checks.py
           python3 .ci/select-checks.py "$matrix_file" >> "$GITHUB_OUTPUT"
         env:
+          QUALIFICATION_PLATFORM: ${{ inputs.platform || 'all' }}
           FULL_QUALIFICATION: ${{ inputs.full || false }}
           INCLUDE_BENCHMARKS: ${{ inputs.benchmarks || false }}
 
   nix-matrix-job:
+    if: inputs.platform != 'macos'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     needs:

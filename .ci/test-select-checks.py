@@ -58,6 +58,24 @@ class SelectionTests(unittest.TestCase):
             entry for entry in self.matrix["include"] if entry["name"] != "stable-lix"
         ]})
 
+    def test_platform_qualification(self):
+        for full in (False, True):
+            for platform, os_name in (("linux", "ubuntu-latest"),
+                                      ("macos", "macos-latest")):
+                with self.subTest(full=full, platform=platform):
+                    matrix, rust = checks.select(self.matrix, full=full, platform=platform)
+                    self.assertEqual({entry["os"] for entry in rust["include"]}, {os_name})
+                    self.assertEqual(len(rust["include"]), 5 if full else
+                                     (2 if platform == "linux" else 1))
+                    if platform == "macos":
+                        self.assertEqual(matrix, {"include": []})
+                    else:
+                        self.assertTrue(matrix["include"])
+
+    def test_invalid_platform_fails(self):
+        with self.assertRaisesRegex(ValueError, "Unknown qualification platform"):
+            checks.select(self.matrix, platform="windows")
+
     def test_missing_required_check_fails(self):
         with self.assertRaisesRegex(ValueError, "Missing routine checks"):
             checks.select({"include": []})

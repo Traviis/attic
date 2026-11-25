@@ -10,7 +10,9 @@ ROUTINE = {"basic-sqlite-local", "basic-postgres-garage", "lix"}
 BENCHMARKS = {"access-update-performance", "stable-access-update-performance"}
 
 
-def select(matrix, full=False, benchmarks=False):
+def select(matrix, full=False, benchmarks=False, platform="all"):
+    if platform not in ("all", "linux", "macos"):
+        raise ValueError(f"Unknown qualification platform: {platform}")
     available = {entry["name"] for entry in matrix["include"]}
     missing = ROUTINE - available
     if missing:
@@ -32,6 +34,11 @@ def select(matrix, full=False, benchmarks=False):
             for os_name in ("ubuntu-latest", "macos-latest")
             for version in ("2.28", "2.30", "2.31", "2.34", "default")
         ]
+    if platform != "all":
+        os_name = "ubuntu-latest" if platform == "linux" else "macos-latest"
+        rust = [entry for entry in rust if entry["os"] == os_name]
+    if platform == "macos":
+        checks = []
     return {"include": checks}, {"include": rust}
 
 
@@ -41,6 +48,7 @@ if __name__ == "__main__":
             json.loads(Path(sys.argv[1]).read_text()),
             full=os.environ.get("FULL_QUALIFICATION") == "true",
             benchmarks=os.environ.get("INCLUDE_BENCHMARKS") == "true",
+            platform=os.environ.get("QUALIFICATION_PLATFORM", "all"),
         )
     except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
         sys.exit(f"Cannot select CI checks: {error}")

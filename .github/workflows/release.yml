@@ -20,6 +20,18 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       full: true
+      platform: linux
+    secrets:
+      ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
+      ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
+      ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+  # macOS qualification is advisory: hosted ARM runner capacity can cancel
+  # jobs before execution. macOS build/test failures also do not block releases.
+  qualify-macos:
+    uses: ./.github/workflows/build.yml
+    with:
+      full: true
+      platform: macos
     secrets:
       ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
       ATTIC_CACHE: ${{ secrets.ATTIC_CACHE }}
@@ -85,9 +97,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
+          QUALIFICATION_NOTE: >-
+            Linux qualification is required for publication. macOS
+            qualification is advisory because hosted ARM runner capacity can
+            cancel jobs before execution; macOS build/test failures also do not
+            block this release.
         run: |
           gh release create "v$RELEASE_VERSION" --target "$GITHUB_SHA" \
-            --title "v$RELEASE_VERSION" --generate-notes --draft
+            --title "v$RELEASE_VERSION" --generate-notes --draft \
+            --notes "$QUALIFICATION_NOTE"
       - name: Publish OCI images
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

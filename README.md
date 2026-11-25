@@ -54,6 +54,12 @@ Releases use CalVer `YYYY.M.PATCH` and two manually dispatched Actions workflows
    `ghcr.io/traviis/attic`, tagged with the full commit SHA and version, then
    publishes the GitHub Release. Image failure leaves the release as a draft.
 
+Linux qualification is required for publication. macOS qualification runs
+separately and is advisory: GitHub's hosted ARM runner capacity can cancel jobs
+before execution. Neither those cancellations nor macOS build/test failures
+block publication. Release notes disclose this policy; green Linux qualification
+does not establish macOS compatibility.
+
 No scheduled releases or moving `latest` tags. Pin deployments to a registry
 digest. Repository Actions settings must permit workflows to create pull
 requests; the repository token needs package publication permission.
