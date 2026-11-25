@@ -55,6 +55,76 @@ def ready(url):
     raise AssertionError("isolated service failed to start")
 
 
+def qualify_store(root, env, attic_url, cache_url, issue, good, rotated, request):
+    """Guest-only store mutations; credential writer uses atomic replacement."""
+    assert os.environ.get("ATTIC_VM_STORE_TEST") == "1"
+    token_file = root / "push.jwt"
+    netrc = root / "netrc"
+
+    def replace(path, content):
+        temporary = path.with_suffix(".replacement")
+        temporary.write_text(content)
+        temporary.chmod(0o600)
+        temporary.replace(path)
+
+    def credentials(jwt):
+        replace(token_file, jwt + "\n")
+        replace(netrc, f"machine 127.0.0.1 login attic password {jwt}\n")
+
+    def command(*args):
+        return subprocess.check_output(args, env=env, text=True).strip()
+
+    credentials(good)
+    subprocess.run(
+        ["attic", "login", "store-test", attic_url, "--token-file", str(token_file)],
+        env=env, check=True,
+    )
+    status, body = request(cache_url, good)
+    assert status == 200
+    try:
+        public_key = json.loads(body)["public_key"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise AssertionError("Cache configuration requires signing public key") from error
+    for number, jwt in enumerate((good, rotated)):
+        credentials(jwt)
+        source = root / f"payload-{number}"
+        source.mkdir()
+        (source / "contents").write_bytes(bytes(range(256)) * 16384 + bytes([number]))
+        (source / "link").symlink_to("contents")
+        path = command("nix-store", "--add", str(source))
+        assert path.startswith("/nix/store/")
+        expected_hash = command("nix-store", "--query", "--hash", path)
+        subprocess.run(["attic", "push", "store-test:test", path], env=env, check=True)
+        subprocess.run(["nix-store", "--delete", path], env=env, check=True)
+        assert not Path(path).exists()
+        restore = [
+            "nix-store", "--realise", path,
+            "--option", "substituters", attic_url + "/test",
+            "--option", "trusted-public-keys", public_key,
+            "--option", "require-sigs", "true",
+            "--option", "fallback", "false",
+            "--option", "narinfo-cache-negative-ttl", "0",
+            "--option", "netrc-file", str(netrc),
+        ]
+        denied_jwt = issue("unmapped")
+        credentials(denied_jwt)
+        narinfo_url = attic_url + "/test/" + Path(path).name[:32] + ".narinfo"
+        assert request(narinfo_url, denied_jwt)[0] == 401
+        denied = subprocess.run(restore, env=env, capture_output=True, text=True, check=False)
+        assert denied.returncode != 0 and not Path(path).exists()
+        assert any(message in denied.stderr for message in (
+            "401", "403", "there is no substituter that can build it"
+        )), denied.stderr
+        credentials(jwt)
+        subprocess.run(restore, env=env, check=True)
+        assert command("nix-store", "--query", "--hash", path) == expected_hash
+        assert (Path(path) / "contents").read_bytes() == (source / "contents").read_bytes()
+        assert (Path(path) / "link").readlink() == Path("contents")
+        subprocess.run(["nix-store", "--verify-path", path], env=env, check=True)
+        subprocess.run(["nix-store", "--delete", path], env=env, check=True)
+    print("PASS: real CLI push and signed private substitution before/after credential rotation")
+
+
 def run():
     with tempfile.TemporaryDirectory(prefix="attic-vault-jwt-") as directory:
         root = Path(directory)
@@ -300,6 +370,8 @@ cc = 1
                 assert rotated.split(".")[0] != good.split(".")[0]
                 assert request(cache_url, rotated)[0] == 200
                 assert request(cache_url, good)[0] == 200
+                if os.environ.get("ATTIC_VM_STORE_TEST") == "1":
+                    qualify_store(root, env, attic_url, cache_url, issue, good, rotated, request)
                 # Existing login supports supplied external JWT and file source.
                 assert (
                     subprocess.run(

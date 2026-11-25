@@ -17,6 +17,6 @@ in {
     start_all()
     machine.wait_for_unit("multi-user.target")
     with subtest("Vault-issued JWTs and rotating client credentials"):
-        machine.succeed("python3 ${./test.py}")
+        machine.succeed("ATTIC_VM_STORE_TEST=1 python3 ${./test.py}")
   '';
 }

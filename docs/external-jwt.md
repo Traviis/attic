@@ -168,3 +168,12 @@ requires KVM and verifies guest boot plus the packaged binaries and their runtim
 dependencies in NixOS. Both services use guest-local loopback; this does not test
 cross-host TLS or a deployed Vault instance. The VM check runs in routine Linux
 CI; `stable-external-jwt-vm` is included in full qualification.
+
+The VM also pushes two distinct 4 MiB store paths with the real `attic push`
+command, deletes only those guest-created paths, and restores each exclusively
+from the private cache with Nix signature verification enabled. It verifies NAR
+hashes, payload bytes and symlinks. The second cycle atomically replaces the JWT
+and dedicated netrc with credentials issued after Vault signing-key rotation;
+login is not repeated. Unmapped credentials must fail private substitution.
+Credential files are written by the test, not by Vault Agent: this qualifies
+consumer behavior across replacement, not Agent template scheduling or renewal.
